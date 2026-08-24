@@ -19,9 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/ellistarn/kro/experimental/controller/compiler"
-	dagpkg "github.com/ellistarn/kro/experimental/controller/dag"
-	graphpkg "github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/compiler"
+	dagpkg "github.com/kporwal-aws/kro/experimental/controller/dag"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // nodeResult carries a node's evaluation output back to the propagation loop.

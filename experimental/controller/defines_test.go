@@ -8,11 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/graph"
 
-	"github.com/ellistarn/kro/experimental/controller/compiler"
-	dagpkg "github.com/ellistarn/kro/experimental/controller/dag"
-	graphpkg "github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/compiler"
+	dagpkg "github.com/kporwal-aws/kro/experimental/controller/dag"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // ---------------------------------------------------------------------------

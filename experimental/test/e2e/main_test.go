@@ -18,8 +18,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/ellistarn/kro/experimental/stdlib"
-	"github.com/ellistarn/kro/experimental/test/testenv"
+	"github.com/kporwal-aws/kro/experimental/stdlib"
+	"github.com/kporwal-aws/kro/experimental/test/testenv"
 )
 
 var (

@@ -25,8 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	dagpkg "github.com/ellistarn/kro/experimental/controller/dag"
-	graphpkg "github.com/ellistarn/kro/experimental/controller/graph"
+	dagpkg "github.com/kporwal-aws/kro/experimental/controller/dag"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // finalizationResult carries the output of advanceFinalization back to the

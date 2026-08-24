@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	graphpkg "github.com/ellistarn/kro/experimental/controller/graph"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // ---------------------------------------------------------------------------

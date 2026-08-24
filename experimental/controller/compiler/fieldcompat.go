@@ -7,7 +7,7 @@ import (
 	"github.com/google/cel-go/cel"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
-	"github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // validateExprFieldCompat checks that standalone expressions in node bodies

@@ -21,10 +21,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	"github.com/ellistarn/kro/experimental/controller/compiler"
-	dagpkg "github.com/ellistarn/kro/experimental/controller/dag"
-	graphpkg "github.com/ellistarn/kro/experimental/controller/graph"
-	"github.com/ellistarn/kro/experimental/controller/watches"
+	"github.com/kporwal-aws/kro/experimental/controller/compiler"
+	dagpkg "github.com/kporwal-aws/kro/experimental/controller/dag"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/watches"
 )
 
 // ---------------------------------------------------------------------------

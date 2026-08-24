@@ -1,4 +1,4 @@
-module github.com/ellistarn/kro/experimental
+module github.com/kporwal-aws/kro/experimental
 
 go 1.26.0
 

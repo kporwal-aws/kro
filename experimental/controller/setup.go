@@ -20,9 +20,9 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/ellistarn/kro/experimental/controller/compiler"
-	graphpkg "github.com/ellistarn/kro/experimental/controller/graph"
-	"github.com/ellistarn/kro/experimental/controller/watches"
+	"github.com/kporwal-aws/kro/experimental/controller/compiler"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/watches"
 	schemaresolver "github.com/kubernetes-sigs/kro/pkg/graph/schema/resolver"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller"

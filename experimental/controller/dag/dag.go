@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // ErrCircularDependency indicates that the dependency graph contains a cycle.

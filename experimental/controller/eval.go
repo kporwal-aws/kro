@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ellistarn/kro/experimental/controller/compiler"
-	"github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/compiler"
+	"github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // containsVolatileExpr reports whether a template string contains any CEL

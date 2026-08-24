@@ -21,7 +21,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 
-	chartstdlib "github.com/ellistarn/kro/experimental/charts/stdlib"
+	chartstdlib "github.com/kporwal-aws/kro/experimental/charts/stdlib"
 )
 
 // resources contains the stdlib YAML files that live in this package.

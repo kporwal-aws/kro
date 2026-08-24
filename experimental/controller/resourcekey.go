@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
-	graphpkg "github.com/ellistarn/kro/experimental/controller/graph"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // scopeResolver reports whether a GVK is namespace-scoped, using a RESTMapper.

@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
-	"github.com/ellistarn/kro/experimental/controller/compiler"
+	"github.com/kporwal-aws/kro/experimental/controller/compiler"
 )
 
 func TestSchemaGeneration_Advances(t *testing.T) {

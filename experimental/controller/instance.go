@@ -9,8 +9,8 @@ package graphcontroller
 import (
 	"sync"
 
-	"github.com/ellistarn/kro/experimental/controller/compiler"
-	dagpkg "github.com/ellistarn/kro/experimental/controller/dag"
+	"github.com/kporwal-aws/kro/experimental/controller/compiler"
+	dagpkg "github.com/kporwal-aws/kro/experimental/controller/dag"
 )
 
 // instanceState holds the compilation artifacts for a single reconcile cycle.

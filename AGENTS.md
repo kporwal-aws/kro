@@ -2,22 +2,22 @@
 
 ## Repository
 
-Fork of `kubernetes-sigs/kro`. Remote `origin` is `ellistarn/kro`,
+Fork of `kubernetes-sigs/kro`. Remote `origin` is `kporwal-aws/kro`,
 `upstream` is `kubernetes-sigs/kro`.
 
 ## PR Target
 
-All PRs target `ellistarn/kro`, base branch `krocodile`.
+All PRs target `kporwal-aws/kro`, base branch `krocodile`.
 Not `main`. Not upstream.
 
 GitHub defaults PRs against upstream (`kubernetes-sigs/kro`). Always use
 the explicit fork URL when creating PRs:
 
-    gh pr create --repo ellistarn/kro --base krocodile
+    gh pr create --repo kporwal-aws/kro --base krocodile
 
 Or open in browser:
 
-    https://github.com/ellistarn/kro/compare/krocodile...<branch>?expand=1
+    https://github.com/kporwal-aws/kro/compare/krocodile...<branch>?expand=1
 
 ## Worktrees
 

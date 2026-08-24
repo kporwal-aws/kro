@@ -7,7 +7,7 @@ package watches
 import (
 	"sync"
 
-	"github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/graph"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/labels"

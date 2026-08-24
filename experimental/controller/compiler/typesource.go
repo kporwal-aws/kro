@@ -10,7 +10,7 @@ import (
 	"k8s.io/apiserver/pkg/cel/openapi/resolver"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
-	"github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/graph"
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 )
 

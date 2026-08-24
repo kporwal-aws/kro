@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ellistarn/kro/experimental/controller/compiler"
+	"github.com/kporwal-aws/kro/experimental/controller/compiler"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )

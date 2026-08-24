@@ -4,7 +4,7 @@ package compiler
 import (
 	apiservercel "k8s.io/apiserver/pkg/cel"
 
-	"github.com/ellistarn/kro/experimental/controller/graph"
+	"github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // ---------------------------------------------------------------------------

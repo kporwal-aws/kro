@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	graphpkg "github.com/ellistarn/kro/experimental/controller/graph"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
 )
 
 // reconcileForEach iterates a collection and stamps the template per item.

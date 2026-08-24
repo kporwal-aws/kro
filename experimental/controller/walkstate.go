@@ -10,7 +10,7 @@ package graphcontroller
 import (
 	"fmt"
 
-	dagpkg "github.com/ellistarn/kro/experimental/controller/dag"
+	dagpkg "github.com/kporwal-aws/kro/experimental/controller/dag"
 )
 
 // NodeState tracks the reconcile-time state of a single node.

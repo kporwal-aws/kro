@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	graphcontroller "github.com/ellistarn/kro/experimental/controller"
+	graphcontroller "github.com/kporwal-aws/kro/experimental/controller"
 )
 
 func main() {
