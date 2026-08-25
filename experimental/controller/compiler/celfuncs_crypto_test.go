@@ -352,3 +352,207 @@ func escapeCEL(s string) string {
 	}
 	return out
 }
+
+// x509.createCertificate tests
+
+func parseCertPEM(t *testing.T, pemStr string) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		t.Fatal("failed to decode certificate PEM")
+	}
+	if block.Type != "CERTIFICATE" {
+		t.Fatalf("unexpected PEM type: %s", block.Type)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("failed to parse certificate: %v", err)
+	}
+	return cert
+}
+
+func TestX509CreateCertificate_SelfSignedCA(t *testing.T) {
+	priv := mustEvalCryptoString(t, `rsa.generateKey(2048)`)
+	expr := `x509.createCertificate("` + escapeCEL(priv) + `", {"subject": {"commonName": "My CA"}, "isCA": true, "validityDays": 1825})`
+	certPEM := mustEvalCryptoString(t, expr)
+	cert := parseCertPEM(t, certPEM)
+
+	if cert.Subject.CommonName != "My CA" {
+		t.Fatalf("expected CN 'My CA', got %s", cert.Subject.CommonName)
+	}
+	if !cert.IsCA {
+		t.Fatal("expected IsCA to be true")
+	}
+	if cert.BasicConstraintsValid != true {
+		t.Fatal("expected BasicConstraintsValid")
+	}
+	if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		t.Fatal("expected KeyUsageCertSign")
+	}
+	if cert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		t.Fatal("expected KeyUsageDigitalSignature")
+	}
+
+	// Verify self-signed
+	if err := cert.CheckSignatureFrom(cert); err != nil {
+		t.Fatalf("certificate is not validly self-signed: %v", err)
+	}
+}
+
+func TestX509CreateCertificate_LeafCert(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	expr := `x509.createCertificate("` + escapeCEL(priv) + `", {"subject": {"commonName": "app.example.com"}, "dnsNames": ["extra.example.com"], "validityDays": 90})`
+	certPEM := mustEvalCryptoString(t, expr)
+	cert := parseCertPEM(t, certPEM)
+
+	if cert.Subject.CommonName != "app.example.com" {
+		t.Fatalf("expected CN 'app.example.com', got %s", cert.Subject.CommonName)
+	}
+	if cert.IsCA {
+		t.Fatal("expected IsCA to be false")
+	}
+
+	// CN should be auto-added to DNSNames
+	found := false
+	for _, d := range cert.DNSNames {
+		if d == "app.example.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("CN should be in DNSNames")
+	}
+	// extra dns name should be present
+	foundExtra := false
+	for _, d := range cert.DNSNames {
+		if d == "extra.example.com" {
+			foundExtra = true
+		}
+	}
+	if !foundExtra {
+		t.Fatal("extra.example.com should be in DNSNames")
+	}
+}
+
+func TestX509CreateCertificate_WithIPAddresses(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	expr := `x509.createCertificate("` + escapeCEL(priv) + `", {"subject": {"commonName": "node"}, "ipAddresses": ["10.0.0.1", "::1"]})`
+	certPEM := mustEvalCryptoString(t, expr)
+	cert := parseCertPEM(t, certPEM)
+
+	if len(cert.IPAddresses) != 2 {
+		t.Fatalf("expected 2 IPs, got %d", len(cert.IPAddresses))
+	}
+}
+
+func TestX509CreateCertificate_WithOrganization(t *testing.T) {
+	priv := mustEvalCryptoString(t, `rsa.generateKey(2048)`)
+	expr := `x509.createCertificate("` + escapeCEL(priv) + `", {"subject": {"commonName": "my-ca", "organization": ["team-a", "team-b"]}, "isCA": true})`
+	certPEM := mustEvalCryptoString(t, expr)
+	cert := parseCertPEM(t, certPEM)
+
+	if len(cert.Subject.Organization) != 2 {
+		t.Fatalf("expected 2 orgs, got %v", cert.Subject.Organization)
+	}
+}
+
+func TestX509CreateCertificate_CustomKeyUsage(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	expr := `x509.createCertificate("` + escapeCEL(priv) + `", {"subject": {"commonName": "signer"}, "keyUsage": ["digitalSignature", "crlSign", "certSign"], "isCA": true})`
+	certPEM := mustEvalCryptoString(t, expr)
+	cert := parseCertPEM(t, certPEM)
+
+	if cert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		t.Fatal("expected KeyUsageDigitalSignature")
+	}
+	if cert.KeyUsage&x509.KeyUsageCRLSign == 0 {
+		t.Fatal("expected KeyUsageCRLSign")
+	}
+	if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		t.Fatal("expected KeyUsageCertSign")
+	}
+}
+
+func TestX509CreateCertificate_Ed25519(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ed25519.generateKey()`)
+	expr := `x509.createCertificate("` + escapeCEL(priv) + `", {"subject": {"commonName": "ed-ca"}, "isCA": true})`
+	certPEM := mustEvalCryptoString(t, expr)
+	cert := parseCertPEM(t, certPEM)
+
+	if cert.Subject.CommonName != "ed-ca" {
+		t.Fatalf("expected CN 'ed-ca', got %s", cert.Subject.CommonName)
+	}
+	if cert.SignatureAlgorithm != x509.PureEd25519 {
+		t.Fatalf("expected PureEd25519, got %v", cert.SignatureAlgorithm)
+	}
+}
+
+func TestX509CreateCertificate_DefaultValidity(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	expr := `x509.createCertificate("` + escapeCEL(priv) + `", {"subject": {"commonName": "default-validity"}})`
+	certPEM := mustEvalCryptoString(t, expr)
+	cert := parseCertPEM(t, certPEM)
+
+	// Default validity should be ~365 days
+	duration := cert.NotAfter.Sub(cert.NotBefore)
+	expectedDays := 365
+	actualDays := int(duration.Hours() / 24)
+	if actualDays != expectedDays {
+		t.Fatalf("expected %d days validity, got %d", expectedDays, actualDays)
+	}
+}
+
+func TestX509CreateCertificate_InvalidKey(t *testing.T) {
+	_, err := evalCryptoString(t, `x509.createCertificate("bad", {"subject": {"commonName": "x"}})`)
+	if err == nil {
+		t.Fatal("expected error for invalid key PEM")
+	}
+}
+
+func TestX509CreateCertificate_MissingSubject(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	_, err := evalCryptoString(t, `x509.createCertificate("`+escapeCEL(priv)+`", {"dnsNames": ["x"]})`)
+	if err == nil {
+		t.Fatal("expected error for missing subject")
+	}
+}
+
+func TestX509CreateCertificate_NoIdentity(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	_, err := evalCryptoString(t, `x509.createCertificate("`+escapeCEL(priv)+`", {"subject": {}})`)
+	if err == nil {
+		t.Fatal("expected error when no identity provided")
+	}
+}
+
+func TestX509CreateCertificate_InvalidKeyUsage(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	_, err := evalCryptoString(t, `x509.createCertificate("`+escapeCEL(priv)+`", {"subject": {"commonName": "x"}, "keyUsage": ["bogus"]})`)
+	if err == nil {
+		t.Fatal("expected error for invalid keyUsage")
+	}
+}
+
+func TestX509CreateCertificate_InvalidValidityDays(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	_, err := evalCryptoString(t, `x509.createCertificate("`+escapeCEL(priv)+`", {"subject": {"commonName": "x"}, "validityDays": -1})`)
+	if err == nil {
+		t.Fatal("expected error for negative validityDays")
+	}
+}
+
+func TestX509CreateCertificate_UnknownKey(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	_, err := evalCryptoString(t, `x509.createCertificate("`+escapeCEL(priv)+`", {"subject": {"commonName": "x"}, "bogus": "val"})`)
+	if err == nil {
+		t.Fatal("expected error for unknown template key")
+	}
+}
+
+func TestX509CreateCertificate_InvalidIP(t *testing.T) {
+	priv := mustEvalCryptoString(t, `ecdsa.generateKey("P256")`)
+	_, err := evalCryptoString(t, `x509.createCertificate("`+escapeCEL(priv)+`", {"subject": {"commonName": "x"}, "ipAddresses": ["not.an.ip"]})`)
+	if err == nil {
+		t.Fatal("expected error for invalid IP")
+	}
+}
