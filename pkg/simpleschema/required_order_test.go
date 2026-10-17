@@ -99,3 +99,43 @@ func TestToOpenAPISpecRequiredIsStableAcrossBuilds(t *testing.T) {
 			"build %d produced a different required[] ordering", i)
 	}
 }
+
+// Required custom types append to the parent's required list from a different
+// site than the required=true marker, so both paths must end up sorted together,
+// at the root and in nested objects.
+func TestToOpenAPISpecSortsRequiredCustomTypes(t *testing.T) {
+	customTypes := map[string]interface{}{
+		"Port": "integer | required=true",
+		"Host": map[string]interface{}{
+			"name": "string",
+		},
+	}
+	obj := map[string]interface{}{
+		"zebra":   "Port",
+		"alpha":   "string | required=true",
+		"mike":    "Port",
+		"bravo":   "integer | required=true",
+		"yankee":  "Port",
+		"charlie": "boolean | required=true",
+		"host":    "Host",
+		"nested": map[string]interface{}{
+			"zulu":     "Port",
+			"alpha":    "string | required=true",
+			"november": "Port",
+			"echo":     "integer | required=true",
+			"kilo":     "Port",
+			"delta":    "string | required=true",
+		},
+	}
+
+	for i := 0; i < 100; i++ {
+		schema, err := ToOpenAPISpec(obj, customTypes)
+		require.NoError(t, err)
+		require.Equal(t,
+			[]string{"alpha", "bravo", "charlie", "mike", "yankee", "zebra"},
+			schema.Required, "build %d: root required[]", i)
+		require.Equal(t,
+			[]string{"alpha", "delta", "echo", "kilo", "november", "zulu"},
+			schema.Properties["nested"].Required, "build %d: nested required[]", i)
+	}
+}
