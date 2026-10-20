@@ -365,6 +365,7 @@ func ssaWrite(ctx context.Context, c client.Client, obj *unstructured.Unstructur
 			}
 		}
 	}
+	mainPayload = omitEmptyNamespace(mainPayload)
 
 	var readBack *unstructured.Unstructured
 	{
@@ -390,15 +391,8 @@ func ssaWrite(ctx context.Context, c client.Client, obj *unstructured.Unstructur
 		readBack = applied
 	}
 	if hasStatus && statusData != nil {
-		statusPayload := map[string]any{
-			"apiVersion": obj.GetAPIVersion(),
-			"kind":       obj.GetKind(),
-			"metadata": map[string]any{
-				"name":      obj.GetName(),
-				"namespace": obj.GetNamespace(),
-			},
-			"status": statusData,
-		}
+		statusPayload := identityBody(obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+		statusPayload["status"] = statusData
 		sData, err := json.Marshal(statusPayload)
 		if err != nil {
 			return nil, fmt.Errorf("marshaling status: %w", err)
@@ -649,23 +643,51 @@ func fieldsSubtract(a, b map[string]any) map[string]any {
 	return result
 }
 
+// identityBody returns an apply body carrying only apiVersion, kind,
+// metadata.name and metadata.namespace. The namespace key is omitted when
+// empty: sending "namespace": "" for a cluster-scoped object makes the
+// apiserver count an otherwise-unchanged apply as a change whenever another
+// field manager wrote in between, so two managers sharing an object rewrite
+// it (managedFields time/order only) on every apply, forever.
+func identityBody(gvk schema.GroupVersionKind, namespace, name string) map[string]any {
+	u := &unstructured.Unstructured{Object: map[string]any{}}
+	u.SetGroupVersionKind(gvk)
+	u.SetName(name)
+	u.SetNamespace(namespace)
+	return u.Object
+}
+
+// omitEmptyNamespace returns payload without an empty metadata.namespace key
+// (see identityBody). Rendered templates can carry one explicitly, e.g.
+// instance.metadata.?namespace.orValue(""). The payload is copied, not
+// mutated, when the key is dropped.
+func omitEmptyNamespace(payload map[string]any) map[string]any {
+	md, ok := payload["metadata"].(map[string]any)
+	if !ok {
+		return payload
+	}
+	if ns, has := md["namespace"]; !has || ns != "" {
+		return payload
+	}
+	newMD := make(map[string]any, len(md))
+	for k, v := range md {
+		if k != "namespace" {
+			newMD[k] = v
+		}
+	}
+	out := make(map[string]any, len(payload))
+	for k, v := range payload {
+		out[k] = v
+	}
+	out["metadata"] = newMD
+	return out
+}
+
 // buildSurgicalBody creates an unstructured object body containing identity
 // fields (apiVersion, kind, metadata.name, metadata.namespace) plus values
 // extracted from the current object at paths specified by the fieldsV1 tree.
 func buildSurgicalBody(current *unstructured.Unstructured, gvk schema.GroupVersionKind, fields map[string]any) map[string]any {
-	apiVersion := gvk.Group + "/" + gvk.Version
-	if gvk.Group == "" {
-		apiVersion = gvk.Version
-	}
-
-	body := map[string]any{
-		"apiVersion": apiVersion,
-		"kind":       gvk.Kind,
-		"metadata": map[string]any{
-			"name":      current.GetName(),
-			"namespace": current.GetNamespace(),
-		},
-	}
+	body := identityBody(gvk, current.GetNamespace(), current.GetName())
 
 	// Walk the fieldsV1 tree and extract corresponding values from current object.
 	extractFieldValues(current.Object, fields, body)
@@ -779,18 +801,7 @@ func releaseApply(ctx context.Context, c client.Client, gvk schema.GroupVersionK
 		return nil, fmt.Errorf("checking existence before release apply for %s/%s: %w", namespace, name, err)
 	}
 
-	apiVersion := gvk.Group + "/" + gvk.Version
-	if gvk.Group == "" {
-		apiVersion = gvk.Version
-	}
-	release := map[string]any{
-		"apiVersion": apiVersion,
-		"kind":       gvk.Kind,
-		"metadata": map[string]any{
-			"name":      name,
-			"namespace": namespace,
-		},
-	}
+	release := identityBody(gvk, namespace, name)
 	if hasStatus {
 		// Include "status": {} so SSA releases all previously-owned status fields.
 		// An identity-only release body (apiVersion/kind/metadata) is ignored by
