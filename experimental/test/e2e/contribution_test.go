@@ -25,9 +25,9 @@ import (
 //	"Different Graphs can manage different fields on the same resource
 //	without conflict."
 //
-// This is the core ownership model: each Graph uses a dedicated field manager
-// (<name>.<ns>.internal.kro.run), so SSA field ownership is scoped per
-// Graph. Two Graphs writing disjoint field sets on the same resource must not
+// This is the core ownership model: each node of each Graph uses a dedicated
+// field manager (<node>.<name>.<ns>.internal.kro.run), so SSA field ownership
+// is scoped per node and never shared across Graphs. Two Graphs writing disjoint field sets on the same resource must not
 // produce a 409 conflict, and each Graph's fields must persist independently.
 func TestMultiGraphFieldCoexistence(t *testing.T) {
 	t.Parallel()
@@ -603,7 +603,7 @@ func TestPatch_RegressionStatusSubresourceTeardown(t *testing.T) {
 
 	// Verify the Graph's field manager state after release apply.
 	managedFields := finalTarget.GetManagedFields()
-	graphManager := "contrib-status-teardown." + ns + ".internal.kro.run"
+	graphManager := nodeFieldManager("statusContrib", "contrib-status-teardown", ns)
 
 	// Main resource: release apply should release identity labels/annotations.
 	for _, mf := range managedFields {
@@ -619,7 +619,7 @@ func TestPatch_RegressionStatusSubresourceTeardown(t *testing.T) {
 	// Status subresource: release apply should release status fields.
 	var graphOwnsStatusFields bool
 	for _, mf := range managedFields {
-		if mf.Manager == graphManager && mf.Subresource == "status" && mf.FieldsV1 != nil {
+		if mf.Manager == graphManager+".status" && mf.Subresource == "status" && mf.FieldsV1 != nil {
 			fields := string(mf.FieldsV1.Raw)
 			if strings.Contains(fields, "message") {
 				graphOwnsStatusFields = true
@@ -731,7 +731,7 @@ func TestPatchMetadataAndStatus(t *testing.T) {
 	t.Log("Both metadata and status contributed successfully")
 
 	// Record the field manager name for later assertions.
-	graphManager := graphName + "." + ns + ".internal.kro.run"
+	graphManager := nodeFieldManager("contrib", graphName, ns)
 	statusManager := graphManager + ".status"
 
 	// Verify the field manager has entries for BOTH subresources.
@@ -919,7 +919,7 @@ func TestPatchMapFieldOwnership(t *testing.T) {
 	t.Log("All keys coexist: 2 external + 2 contributed")
 
 	// Verify field manager ownership before prune.
-	graphManager := graphName + "." + ns + ".internal.kro.run"
+	graphManager := nodeFieldManager("contrib", graphName, ns)
 	managedFields := check.GetManagedFields()
 	var graphOwnsDataKeys bool
 	for _, mf := range managedFields {

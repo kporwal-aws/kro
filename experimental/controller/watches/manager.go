@@ -265,12 +265,21 @@ func (m *WatchManager) DeriveAppliedSet(graphName, namespace string) map[string]
 				key := fmt.Sprintf("%s/%s/%s/%s/%s",
 					gvk.Group, gvk.Version, gvk.Kind,
 					accessor.GetNamespace(), accessor.GetName())
+				// Several nodes of one Graph can write the same object (a
+				// template: plus patch: nodes). The template is the lifecycle
+				// owner, so its classification wins: the object is deleted on
+				// prune, not merely released.
+				if prev, seen := result[key]; seen && prev.NodeType == graph.NodeTypeTemplate {
+					break
+				}
 				result[key] = graph.AppliedEntry{
 					NodeID:   nodeID,
 					NodeType: nodeType,
 					Key:      key,
 				}
-				break // one identity label match per resource is sufficient
+				if nodeType == graph.NodeTypeTemplate {
+					break
+				}
 			}
 		}
 	}

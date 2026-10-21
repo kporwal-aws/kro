@@ -7,6 +7,14 @@ metadata:
     app: graph-controller
 spec:
   replicas: 1
+  # The controller has no leader election: two pods must never run at once.
+  # A rolling update would overlap the old and new pods, and two controller
+  # versions writing the same objects can fight over field ownership — an
+  # older controller sees a newer one's field managers as third-party
+  # co-owners, reports Conflict, and prunes what it no longer considers
+  # converged.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: graph-controller

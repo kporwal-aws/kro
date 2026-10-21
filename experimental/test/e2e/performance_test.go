@@ -288,23 +288,25 @@ func TestDeletionSkipsConflictedResources(t *testing.T) {
 	t.Log("graph-owned-cm deleted during cleanup — deletion semantics confirmed")
 }
 
-// TestDedicatedFieldManagerName verifies that each Graph uses a dedicated SSA
-// field manager in the format `<name>.<namespace>.internal.kro.run`.
+// TestDedicatedFieldManagerName verifies that each node of a Graph uses a
+// dedicated SSA field manager in the format
+// `<node>.<name>.<namespace>.internal.kro.run`.
 //
 // Design 003-ownership § Field Manager:
 //
-//	"Each Graph instance gets a dedicated SSA field manager:
-//	<name>.<namespace>.internal.kro.run"
+//	"Every template: and patch: node of a Graph instance gets a dedicated
+//	SSA field manager: <node>.<name>.<namespace>.internal.kro.run"
 //
-// The field manager name is the key that makes per-Graph field ownership
+// The field manager name is the key that makes per-node field ownership
 // scoped and independent. If the format is wrong, multi-graph coexistence
-// breaks because field managers can't be distinguished by namespace/name.
+// breaks because field managers can't be distinguished by namespace/name,
+// and nodes of one Graph writing the same object release each other's fields.
 func TestDedicatedFieldManagerName(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 
 	graphName := "test-field-manager"
-	expectedManager := graphName + "." + ns + ".internal.kro.run"
+	expectedManager := nodeFieldManager("cm", graphName, ns)
 
 	graph := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -352,7 +354,7 @@ func TestDedicatedFieldManagerName(t *testing.T) {
 	}
 
 	assert.Equal(t, expectedManager, foundManager,
-		"managed resource must have a field manager in format <name>.<ns>.internal.kro.run")
+		"managed resource must have a field manager in format <node>.<name>.<ns>.internal.kro.run")
 	t.Logf("Field manager verified: %s", foundManager)
 }
 

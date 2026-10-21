@@ -122,6 +122,14 @@ is positive evidence that the resource exists. Prune is the recovery path for co
 revision transitions — the old revision's resource is removed, the new creates it fresh without
 contested field ownership.
 
+Prune never acts on a resource the active revision still declares. A candidate is skipped, fail
+closed, when its static key matches an active node that was not excluded, or when its identity
+label names an active node that ended the walk in a state other than Ready, NotReady or Excluded
+(in practice Conflict, since the other states close the prune gate). A conflict on a live node is
+a failure to converge. It is surfaced and retried, never answered by deleting the resource or
+releasing its fields. Excluded nodes, removed nodes and forEach items no longer produced stay
+prunable.
+
 Prune walks the reverse DAG — the same algorithm as propagation, edges pointing from dependent to
 dependency. The walk starts at leaf nodes (no dependents in the forward DAG = no dependencies in the
 reverse DAG). `template:` → delete. `patch:` → [release apply](003-ownership.md#release-apply)

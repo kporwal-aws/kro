@@ -58,7 +58,7 @@ func reconcileNode(ctx context.Context, c *clusterAccess, rs *reconcileScope, no
 			return nil, err
 		}
 	case graphpkg.NodeTypeWatch:
-		err := reconcileWatch(ctx, c.reader, rs, node, eval)
+		err := reconcileWatch(ctx, c.reader, c.scope, rs, node, eval)
 		return &nodeOutput{}, err // Watch handles its own readiness
 	case graphpkg.NodeTypeRef:
 		if err := reconcileRef(ctx, c.reader, c.scope, rs, node, eval); err != nil {
@@ -118,7 +118,11 @@ func reconcileRef(ctx context.Context, reader client.Reader, scope *scopeResolve
 	namespace = defaultNamespace(gvk, namespace, rs.namespace, scope)
 
 	if rs.watcher != nil {
-		rs.watcher.WatchScalar(node.ID, gvkToGVR(gvk), gvk.Kind, name, namespace)
+		gvr, err := scope.resourceFor(gvk)
+		if err != nil {
+			return fmt.Errorf("ref %s: %w", node.ID, err)
+		}
+		rs.watcher.WatchScalar(node.ID, gvr, gvk.Kind, name, namespace)
 	}
 
 	obj := &unstructured.Unstructured{}
@@ -144,9 +148,11 @@ func reconcileRef(ctx context.Context, reader client.Reader, scope *scopeResolve
 //
 // Takes a client.Reader rather than *clusterAccess — Watch only reads from
 // the API server (List). It never writes (no SSA, no Delete) and never
-// consults scope resolution (Watch namespace comes from the template, not
-// defaultNamespace). The narrow parameter makes this dependency explicit.
-func reconcileWatch(ctx context.Context, reader client.Reader, rs *reconcileScope, node graphpkg.Node, eval *evaluator) error {
+// consults namespace defaulting (Watch namespace comes from the template,
+// not defaultNamespace). The scopeResolver is used only to resolve the
+// informer's resource. The narrow parameters make these dependencies
+// explicit.
+func reconcileWatch(ctx context.Context, reader client.Reader, scope *scopeResolver, rs *reconcileScope, node graphpkg.Node, eval *evaluator) error {
 	logger := log.FromContext(ctx)
 
 	tmpl, err := eval.toMapNode(node)
@@ -174,7 +180,11 @@ func reconcileWatch(ctx context.Context, reader client.Reader, rs *reconcileScop
 	}
 
 	if rs.watcher != nil {
-		rs.watcher.WatchCollection(node.ID, gvkToGVR(gvk), gvk.Kind, watchNamespace, labelSelector)
+		gvr, err := scope.resourceFor(gvk)
+		if err != nil {
+			return fmt.Errorf("watch %s: %w", node.ID, err)
+		}
+		rs.watcher.WatchCollection(node.ID, gvr, gvk.Kind, watchNamespace, labelSelector)
 	}
 
 	// Full list every cycle — simple and correct.

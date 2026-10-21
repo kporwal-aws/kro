@@ -18,6 +18,7 @@ package graphcontroller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/kporwal-aws/kro/experimental/controller/compiler"
 	dagpkg "github.com/kporwal-aws/kro/experimental/controller/dag"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
 	"github.com/kporwal-aws/kro/experimental/controller/watches"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -90,6 +92,23 @@ type reconcileScope struct {
 	graphKey  string // "namespace/name" — used by metric store
 	// Metric store reference — persists across reconcile cycles.
 	metricStore *MetricStore
+	// applied holds the latest server response for each object written in
+	// this reconcile, keyed by resource key. Its managedFields let the
+	// post-walk step find field managers of nodes that no longer write the
+	// object without re-reading it.
+	applied map[string]*unstructured.Unstructured
+}
+
+// recordApplied stores the latest server response for an object this
+// reconcile wrote.
+func (rs *reconcileScope) recordApplied(obj *unstructured.Unstructured) {
+	if obj == nil {
+		return
+	}
+	if rs.applied == nil {
+		rs.applied = map[string]*unstructured.Unstructured{}
+	}
+	rs.applied[resourceKey(obj)] = obj
 }
 
 func newReconcileScope(graph *unstructured.Unstructured, watcher *watches.GraphWatcher, metricStore *MetricStore) *reconcileScope {
@@ -207,7 +226,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// -----------------------------------------------------------------------
 	// 8. Prune removed resources
 	// -----------------------------------------------------------------------
-	pr := r.reconcilePrune(ctx, rs, rev.state, rev.eval, rev.dag, wp.keys, rev.supersededRevisions, &wp.summary)
+	pr := r.reconcilePrune(ctx, rs, rev.state, rev.eval, rev.dag, wp.plan, wp.keys, rev.supersededRevisions, &wp.summary)
 
 	// -----------------------------------------------------------------------
 	// 9. Update status
@@ -385,6 +404,7 @@ func (r *GraphReconciler) reconcilePrune(
 	state *instanceState,
 	eval *evaluator,
 	dag *dagpkg.DAG,
+	plan *PlanState,
 	appliedKeys []Applied,
 	supersededRevisions []*unstructured.Unstructured,
 	summary *PlanSummary,
@@ -405,6 +425,16 @@ func (r *GraphReconciler) reconcilePrune(
 		r.pruneStaleMetrics(ctx, rs, dag, supersededRevisions)
 	}
 	cluster := r.cluster()
+
+	// Release field managers of nodes that no longer write an object some
+	// other current node still writes (renamed/removed/excluded nodes and
+	// the legacy per-Graph manager). Prune below only sees objects that
+	// left the applied set entirely.
+	if err := cluster.releaseStaleNodeManagers(ctx, rs, appliedKeys, summary.ConflictNodes); err != nil {
+		logger.Error(err, "releasing stale field managers")
+		result.pending = true
+	}
+
 	allPreviousKeys := map[string]Applied{}
 	logger.V(1).Info("prune gate open", "superseded", len(supersededRevisions))
 
@@ -424,6 +454,9 @@ func (r *GraphReconciler) reconcilePrune(
 	// that may not yet be in the informer cache.
 	supersededDAGs := map[string]*dagpkg.DAG{}
 	for key, a := range extractStaticKeysFromRevisions(supersededRevisions, rs.namespace, cluster.scope) {
+		if existing, ok := allPreviousKeys[key]; ok && existing.NodeType == graphpkg.NodeTypeTemplate {
+			continue // template classification wins for shared objects
+		}
 		allPreviousKeys[key] = a
 	}
 	for _, rev := range supersededRevisions {
@@ -443,6 +476,7 @@ func (r *GraphReconciler) reconcilePrune(
 		currentSet[a.Key] = a
 	}
 	candidates := collectPruneCandidates(allPreviousKeys, currentSet)
+	candidates = filterDeclaredCandidates(ctx, candidates, dag, plan, rs.namespace, cluster.scope)
 	allDAGs := []*dagpkg.DAG{}
 	if dag != nil {
 		allDAGs = append(allDAGs, dag)
@@ -511,4 +545,60 @@ func (r *GraphReconciler) pruneStaleMetrics(ctx context.Context, rs *reconcileSc
 			}
 		}
 	}
+}
+
+// filterDeclaredCandidates removes prune candidates that a node of the active
+// revision still declares, so prune never deletes (or releases) an object
+// whose node is present and merely failed to converge this reconcile. A
+// candidate is kept out of prune, fail closed, when either:
+//
+//   - its static resource key matches a node of the active revision that was
+//     not excluded by includeWhen, or
+//   - its identity label names a node of the active revision whose state is
+//     neither Ready, NotReady nor Excluded (for example Conflict).
+//
+// Pending, Blocked and Error nodes already close the prune gate entirely;
+// Conflict does not, which without this filter turns a field conflict on a
+// template: node into a delete of the live object it manages. Objects of
+// excluded nodes, removed nodes, and forEach items that are no longer
+// produced remain prunable.
+func filterDeclaredCandidates(ctx context.Context, candidates []Applied, dag *dagpkg.DAG, plan *PlanState, namespace string, scope *scopeResolver) []Applied {
+	if dag == nil || plan == nil || len(candidates) == 0 {
+		return candidates
+	}
+	staticKeyNode := map[string]string{}
+	nodeByID := map[string]string{} // lower-cased ID → ID (identity labels are lower-cased)
+	for _, n := range dag.Nodes {
+		if n.Finalizes != "" {
+			continue
+		}
+		nodeByID[strings.ToLower(n.ID)] = n.ID
+		if n.Identity() == nil {
+			continue
+		}
+		if rk := staticResourceKey(n.Identity(), namespace, scope); rk != "" {
+			staticKeyNode[strings.ToLower(rk)] = n.ID
+		}
+	}
+
+	logger := log.FromContext(ctx)
+	kept := candidates[:0:0]
+	for _, c := range candidates {
+		if id, ok := staticKeyNode[strings.ToLower(c.Key)]; ok && plan.States[id] != NodeExcluded {
+			logger.Info("prune skipped: object is declared by a node of the active revision",
+				"key", c.Key, "node", id, "state", plan.States[id].String())
+			continue
+		}
+		if id, ok := nodeByID[strings.ToLower(c.NodeID)]; ok && c.NodeID != "" {
+			switch st := plan.States[id]; st {
+			case NodeReady, NodeNotReady, NodeExcluded:
+			default:
+				logger.Info("prune skipped: object's node is in the active revision and did not converge",
+					"key", c.Key, "node", id, "state", st.String())
+				continue
+			}
+		}
+		kept = append(kept, c)
+	}
+	return kept
 }

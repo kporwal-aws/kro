@@ -52,7 +52,7 @@ import (
 //
 // Called synchronously in SetupWithManager before the controller is registered,
 // so there is no window where a reconcile fires before hydration completes.
-func hydrateWatchCachesFromRevisions(restConfig *rest.Config, watchMgr *watches.WatchManager) {
+func hydrateWatchCachesFromRevisions(restConfig *rest.Config, scope *scopeResolver, watchMgr *watches.WatchManager) {
 	logger := log.Log.WithName("startup-hydration")
 
 	dynClient, err := dynamic.NewForConfig(restConfig)
@@ -113,7 +113,13 @@ func hydrateWatchCachesFromRevisions(restConfig *rest.Config, watchMgr *watches.
 			if err != nil {
 				continue
 			}
-			gvr := gvkToGVR(gv.WithKind(kind))
+			gvr, err := scope.resourceFor(gv.WithKind(kind))
+			if err != nil {
+				// Kind not served (yet). The reconcile path resolves and
+				// registers the watch once it is.
+				logger.Info("skipping watch hydration for unresolvable kind", "revision", rev.GetName(), "err", err)
+				continue
+			}
 			toHydrate[hydrateKey{graph: graph, gvr: gvr, kind: kind}] = struct{}{}
 		}
 	}
@@ -288,7 +294,7 @@ func SetupWithManager(mgr ctrl.Manager, restConfig *rest.Config, maxWorkers int)
 	// controller starts. This ensures deriveAppliedSet works for cross-GVR
 	// transitions on the first reconcile after a restart — no window where
 	// a reconcile fires before the cache is hydrated.
-	hydrateWatchCachesFromRevisions(restConfig, watchMgr)
+	hydrateWatchCachesFromRevisions(restConfig, reconciler.Scope, watchMgr)
 
 	graphObj := &unstructured.Unstructured{}
 	graphObj.SetGroupVersionKind(GraphGVK)

@@ -29,12 +29,53 @@ evict entirely, patches evict surgically — but the invariant is the same.
 
 ## Field Manager
 
-kro uses Kubernetes Server-Side Apply for all writes. Every Graph instance gets a dedicated SSA
-field manager:
+kro uses Kubernetes Server-Side Apply for all writes. Every `template:` and `patch:` node of a
+Graph instance gets a dedicated SSA field manager:
 
 ```
-<name>.<namespace>.internal.kro.run
+<node>.<name>.<namespace>.internal.kro.run
 ```
+
+Status subresource applies use the same name with a `.status` suffix. forEach children apply under
+their parent node's manager; children of one node always target distinct resources, so the
+manager and resource together still identify one child. If the name would exceed the API server's
+128-character limit, the node segment is replaced by a short, stable hash of the node ID.
+
+SSA treats each apply as the manager's complete intent for the resource: fields the manager owned
+but omits are released. Per-node managers are what let several nodes of one Graph write the same
+resource, such as a `template:` that creates it plus a `patch:` that adds to it. Each node owns
+only its own fields, so at steady state every apply is a no-op. With one manager per Graph, each
+node's apply would release the other node's fields and the resource would be rewritten on every
+reconcile.
+
+A Graph's own managers are every manager ending in `.<name>.<namespace>.internal.kro.run` whose
+node segment has no dots. A sibling node's manager is never a third party. Siblings that declare
+the same field with different values get a 409 from the API server and surface as Conflict, the
+same as any other contradictory claim.
+
+The Graph tracks which nodes wrote each resource in the current reconcile. Once every node has
+settled, it releases any of its managers still on such a resource that belong to no current
+writer: a node that was renamed, removed, or excluded while another node still writes the
+resource. Prune does not see these, because the resource stays in the applied set. Managers of
+nodes in Conflict are kept.
+
+**Migration from the per-Graph manager.** Controllers before per-node managers applied every node
+under `<name>.<namespace>.internal.kro.run`. That name still counts as the Graph's own, so it never
+blocks the conflict checks. When a node's apply conflicts only with that manager (the node now
+declares a different value), kro takes the fields over with force. Once the resource's current
+writers have all applied under their own managers, the per-Graph manager is released like any
+stale node manager. That release deletes only fields no current node declares. While any node is
+in Conflict, the per-Graph manager is kept, because it may hold that node's fields.
+
+**The migration is one-way, and controller versions must not overlap.** A controller that predates
+per-node managers recognizes only `<name>.<namespace>.internal.kro.run` as its own. It sees every
+per-node manager as a third-party co-owner of the same fields, so its dry-run reports Conflict on
+every node, and its prune then deletes the resources of conflicted `template:` nodes. That older
+prune lacked the guard described under [Deletion](#deletion). The same happens if an old and a new
+controller run at once, which a rolling update of a controller without leader election does for
+as long as both pods are up. Upgrade with the old controller fully stopped first (the chart's
+Deployment uses the `Recreate` strategy). Do not roll back to a controller that predates per-node
+managers once the new one has written any resource.
 
 Applies default to non-force SSA. On 409, the Graph surfaces the conflict and stops reconciling
 that resource — silent field takeover is a misconfiguration, not a feature.
@@ -67,9 +108,10 @@ eventually diverge. Sole ownership must be enforced, not assumed.
    identity label? If so, Conflict. Only one template owner per resource — templates are
    lifecycle owners, not contributors. Patches skip this check; multiple patches can layer on the
    same resource.
-2. *Field exclusivity (all nodes)* — Does any field in kro's `managedFields` entry overlap with
-   another Apply-type manager's entry? If so, Conflict. This catches agreed-value co-ownership
-   that the API server would otherwise accept silently.
+2. *Field exclusivity (all nodes)* — Does any field in the node's `managedFields` entry overlap
+   with another Apply-type manager's entry? If so, Conflict. This catches agreed-value
+   co-ownership that the API server would otherwise accept silently. Managers of sibling nodes in
+   the same Graph are not third parties and are not checked.
 
 If both checks pass, the real apply proceeds.
 
@@ -80,8 +122,9 @@ controller never removes agreeing managers without Force — co-ownership that f
 check is treated identically to co-ownership that existed before it: Conflict, surface, stop.
 
 **Force path:** Skips dry-run. The real apply takes contested fields (server strips the other
-manager). Post-apply, the controller inspects `managedFields` and evicts remaining co-owners —
-eviction release for templates, surgical release for patches.
+manager). Post-apply, the controller inspects `managedFields` and evicts remaining third-party
+co-owners — eviction release for templates, surgical release for patches. Sibling nodes' managers
+are never evicted.
 
 On success of either path, kro is the sole owner of every declared field — non-force prevents
 co-ownership from forming, force removes it after the fact.
@@ -123,8 +166,26 @@ The label value is the source of truth for a resource's prune action. On control
 current DAG may not contain the node that wrote the resource; the label decides whether cleanup
 deletes the resource (`template`) or releases its fields (`patch`).
 
-The label check runs only for `template:`. Two `patch:` nodes on the same target — the
-steady-state pattern — are allowed.
+The label check runs only for `template:`. Two `patch:` nodes on the same target are a supported
+steady-state pattern, whether they come from different Graphs or from the same Graph. So is a
+`template:` plus `patch:` nodes from the same Graph on one resource. Each node writes its own
+identity labels under its own field manager. When one resource carries labels from several nodes of
+a Graph, the `template` value decides its prune action.
+
+### Secret stringData
+
+`stringData` on a core `v1` Secret is write-only: the API server merges it into `data` and never
+stores it. An apply carrying `stringData` therefore never matches the stored object, so repeat
+applies can persist new versions and two nodes writing `stringData` on one Secret re-trigger each
+other indefinitely. Before applying, kro folds `stringData` into `data` (base64-encoded, with the
+`stringData` value winning on a key collision, as on the API server) and drops `stringData`. The
+node then owns `data.<key>`. A manager that claimed `stringData` under an earlier controller drops
+the claim on its next apply, which removes nothing from the object.
+
+Ownership of those keys follows the usual rules. Releasing a node deletes the `data` keys it solely
+owns. A `data` key that another manager owns with a different value is a Conflict. That includes a
+controller that updates the key with a plain Update. Keys other writers add alongside are
+untouched.
 
 ### Status Subresource
 
@@ -141,8 +202,8 @@ fields, an additional release targets the status subresource.
 
 forEach expands into child nodes — each child manages one resource. The ownership model applies
 per-child: each child's managed resource carries the child's identity label and follows the same
-rules as any other node. The parent is a logical node with no managed resource and no ownership
-semantics.
+rules as any other node. Children apply under the parent node's field manager. The parent is a
+logical node with no managed resource and no ownership semantics.
 
 ## Scenarios
 
@@ -163,8 +224,9 @@ removes the node from the exporting side. Once stable, the importing side can re
 the state is clean, no latent co-ownership.
 
 **Type change across revisions.** Swapping `template:` for `patch:` (or vice versa) on the same
-node ID is a spec edit handled by revision supersession. The running resource is not reclassified
-mid-flight; the next apply overwrites the identity label to match the new declaration. Two
+node ID is a spec edit handled by revision supersession. The field manager is per node ID, not per
+type, so it carries over. The running resource is not reclassified mid-flight; the next apply
+overwrites the identity label to match the new declaration. Two
 invariants hold: a `patch:` → `template:` transition must not release fields the new `template:`
 claims (the controller collapses the pair into a single `template:` reconcile, retiring the old
 `patch:` entry without a release apply); a `template:` → `patch:` transition retains the resource,
@@ -178,7 +240,9 @@ interprets omitted fields as "no longer managed" and releases them. Four variant
 
 - **Full release** — body contains only identity fields (`apiVersion`, `kind`, `metadata.name`,
   `metadata.namespace`). All previously-owned fields are released, including the identity labels.
-  Used when pruning a `patch:` node.
+  Used when pruning a `patch:` node: the release is issued under every manager of the Graph on the
+  resource, since no current node writes it. Also used to release a stale node manager, or the
+  per-Graph manager, from a resource current nodes still write.
 - **Partial release** — body contains the fields to retain. Fields the Graph previously owned but
   no longer declares are released; declared fields remain claimed; the identity label is updated.
   Used when a `template:` → `patch:` transition narrows the Graph's claim.
@@ -195,10 +259,18 @@ SSA field manager names are unauthenticated strings — any client with write ac
 any manager identity. This enables both eviction and surgical release.
 
 The release always targets the main resource; if the node wrote status fields, an additional
-release targets the status subresource. If the release returns 404, the resource is already gone —
+release targets the status subresource. Both release bodies carry only identity fields. A status
+release must not send `"status": {}`: that claims `status` itself and leaves an entry owning
+`f:status`, which other writers' co-ownership checks would read as covering every status field.
+For the same reason, the co-ownership check does not treat a manager that owns only a field's
+presence (an empty `f:<field>` entry) as co-owning another manager's children of that field. If the release returns 404, the resource is already gone —
 release succeeds. Other failures retry on the next reconcile.
 
 ## Deletion
+
+Prune never deletes a resource that a node of the active revision still declares, whatever the
+resource's labels or managedFields say. A `template:` node in Conflict keeps its resource; the
+conflict is surfaced and retried (see 005-reconciliation § Prune).
 
 When a `template:` resource is pruned or torn down, the controller deletes it unconditionally (after
 verifying identity labels to confirm ownership). Field managers on the resource do not block
@@ -218,6 +290,12 @@ cross-namespace references are common. Bind to UIDs that break on delete+recreat
 **managedFields inspection for delete decisions.** Introduces heuristics around substantive vs
 administrative entries and stale managers. Breaks the clean rule: `template:` deletes, `patch:`
 releases.
+
+**One field manager per Graph.** Simpler, and it matches a Graph being one actor. But SSA treats
+each apply as the manager's complete intent for the resource. Two nodes writing one resource under
+one manager release each other's fields on every apply, and the resource never settles. Merging
+every node's body for a resource into one apply would fix that, but couples ordering, readiness,
+error reporting and prune across nodes.
 
 **Co-ownership as steady state.** Two managers writing the same field with the same value creates
 SSA co-ownership silently (no 409). This is a timebomb: values agree today, diverge tomorrow, and

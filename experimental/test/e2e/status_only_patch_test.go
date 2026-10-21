@@ -95,7 +95,7 @@ func TestPatch_StatusOnlyAlsoWritesIdentityLabels(t *testing.T) {
 	// 5. Verify that the graph's main field manager IS present (identity labels
 	//    are written via main apply) alongside the status sub-manager and the
 	//    parent manager.
-	graphManager := "status-only-patch." + ns + ".internal.kro.run"
+	graphManager := nodeFieldManager("statuspatch", "status-only-patch", ns)
 	statusManager := graphManager + ".status"
 
 	var hasGraphMainManager, hasGraphStatusManager, hasParentManager bool
