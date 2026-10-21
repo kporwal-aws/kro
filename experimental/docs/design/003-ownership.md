@@ -162,6 +162,21 @@ steady-state pattern, whether they come from different Graphs or from the same G
 identity labels under its own field manager. When one resource carries labels from several nodes of
 a Graph, the `template` value decides its prune action.
 
+### Secret stringData
+
+`stringData` on a core `v1` Secret is write-only: the API server merges it into `data` and never
+stores it. An apply carrying `stringData` therefore never matches the stored object, so repeat
+applies can persist new versions and two nodes writing `stringData` on one Secret re-trigger each
+other indefinitely. Before applying, kro folds `stringData` into `data` (base64-encoded, with the
+`stringData` value winning on a key collision, as on the API server) and drops `stringData`. The
+node then owns `data.<key>`. A manager that claimed `stringData` under an earlier controller drops
+the claim on its next apply, which removes nothing from the object.
+
+Ownership of those keys follows the usual rules. Releasing a node deletes the `data` keys it solely
+owns. A `data` key that another manager owns with a different value is a Conflict. That includes a
+controller that updates the key with a plain Update. Keys other writers add alongside are
+untouched.
+
 ### Status Subresource
 
 The Kubernetes API server treats the main resource and status subresource as separate SSA endpoints

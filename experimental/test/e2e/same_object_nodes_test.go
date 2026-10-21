@@ -70,9 +70,8 @@ func graphManagersOn(obj *unstructured.Unstructured, graph, ns string) map[strin
 // requireQuiet waits for obj to settle, then asserts its resourceVersion does
 // not change over the steady-state window, and returns the object as last
 // read. Settling allows for a write or two while the Graph converges (for
-// example, a write-only field such as Secret stringData makes an apply count
-// as a change once more when the managedFields timestamp second ticks over);
-// a flapping object never settles.
+// example, while a stale field manager is released); a flapping object never
+// settles.
 func requireQuiet(t *testing.T, gvk schema.GroupVersionKind, key types.NamespacedName) *unstructured.Unstructured {
 	t.Helper()
 	get := func() *unstructured.Unstructured {

@@ -13,6 +13,7 @@ package graphcontroller
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -412,7 +413,8 @@ func dryRunSSA(ctx context.Context, c client.Client, obj *unstructured.Unstructu
 }
 
 // prepareObject creates an Unstructured from the evaluated map, defaults
-// namespace for namespace-scoped resources, and stamps identity labels.
+// namespace for namespace-scoped resources, stamps identity labels, and
+// folds Secret stringData into data (see normalizeSecretStringData).
 func prepareObject(evalMap map[string]any, rs *reconcileScope, nodeID string, nodeType graphpkg.NodeType, generation int64, scope *scopeResolver) (*unstructured.Unstructured, error) {
 	obj := &unstructured.Unstructured{Object: evalMap}
 
@@ -446,7 +448,69 @@ func prepareObject(evalMap map[string]any, rs *reconcileScope, nodeID string, no
 	}
 	obj.SetLabels(lbls)
 
+	// Both the dry-run and the real apply send this body.
+	normalizeSecretStringData(obj.Object)
+
 	return obj, nil
+}
+
+// normalizeSecretStringData folds a core v1 Secret's stringData into data,
+// base64-encoding each value, and removes stringData. stringData is
+// write-only: the API server merges it into data and never stores it, so an
+// apply body that carries it always differs from the stored object. Such an
+// apply can re-stamp the field manager's time and persist a new
+// resourceVersion, which re-triggers every Graph watching the Secret; two
+// nodes writing stringData on one Secret then wake each other up
+// indefinitely. After normalization the body matches what the API server
+// stores and a repeat apply is a no-op. As on the API server, a stringData
+// key overrides the same key in data.
+//
+// The node then owns data.<key> rather than stringData.<key>. A manager whose
+// earlier applies claimed stringData drops that claim on its next apply;
+// since stringData is never stored, dropping it removes nothing from the
+// object.
+//
+// Bodies the API server would reject (non-map stringData or data, non-string
+// values) are left as written so the apply surfaces the server's error.
+func normalizeSecretStringData(obj map[string]any) {
+	if obj["apiVersion"] != "v1" || obj["kind"] != "Secret" {
+		return
+	}
+	raw, ok := obj["stringData"]
+	if !ok {
+		return
+	}
+	if raw == nil {
+		delete(obj, "stringData")
+		return
+	}
+	stringData, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	for _, v := range stringData {
+		if _, ok := v.(string); !ok {
+			return
+		}
+	}
+	var data map[string]any
+	if d, ok := obj["data"]; ok && d != nil {
+		if data, ok = d.(map[string]any); !ok {
+			return
+		}
+	}
+	delete(obj, "stringData")
+	if len(stringData) == 0 {
+		return
+	}
+	merged := make(map[string]any, len(data)+len(stringData))
+	for k, v := range data {
+		merged[k] = v
+	}
+	for k, v := range stringData {
+		merged[k] = base64.StdEncoding.EncodeToString([]byte(v.(string)))
+	}
+	obj["data"] = merged
 }
 
 // registerWatch buffers a watch for the resource so that changes trigger
