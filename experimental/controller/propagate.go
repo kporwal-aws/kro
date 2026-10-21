@@ -81,8 +81,14 @@ func (r *GraphReconciler) propagate(ctx context.Context, rs *reconcileScope, sta
 
 	// Flatten per-node keys into the applied key set.
 	result.nodeKeys = nodeKeys
-	for _, keys := range nodeKeys {
-		result.keys = append(result.keys, keys...)
+	for nodeID, keys := range nodeKeys {
+		for _, k := range keys {
+			// Record the writing node; forEach children carry their parent's ID.
+			if k.NodeID == "" {
+				k.NodeID = nodeID
+			}
+			result.keys = append(result.keys, k)
+		}
 	}
 
 	// Derive aggregate state from the DAG plan.

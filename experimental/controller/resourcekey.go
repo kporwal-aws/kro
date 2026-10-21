@@ -184,6 +184,11 @@ func extractStaticKeysFromRevisions(revisions []*unstructured.Unstructured, name
 				continue
 			}
 			if key := staticResourceKey(node.Identity(), namespace, scope); key != "" {
+				// A template: node targeting the same object as a patch:
+				// node is its lifecycle owner; keep its classification.
+				if existing, ok := keys[key]; ok && existing.NodeType == graphpkg.NodeTypeTemplate {
+					continue
+				}
 				keys[key] = Applied{
 					Key:       key,
 					NodeType:  nodeType,

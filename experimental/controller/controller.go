@@ -27,6 +27,7 @@ import (
 
 	"github.com/kporwal-aws/kro/experimental/controller/compiler"
 	dagpkg "github.com/kporwal-aws/kro/experimental/controller/dag"
+	graphpkg "github.com/kporwal-aws/kro/experimental/controller/graph"
 	"github.com/kporwal-aws/kro/experimental/controller/watches"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -90,6 +91,23 @@ type reconcileScope struct {
 	graphKey  string // "namespace/name" — used by metric store
 	// Metric store reference — persists across reconcile cycles.
 	metricStore *MetricStore
+	// applied holds the latest server response for each object written in
+	// this reconcile, keyed by resource key. Its managedFields let the
+	// post-walk step find field managers of nodes that no longer write the
+	// object without re-reading it.
+	applied map[string]*unstructured.Unstructured
+}
+
+// recordApplied stores the latest server response for an object this
+// reconcile wrote.
+func (rs *reconcileScope) recordApplied(obj *unstructured.Unstructured) {
+	if obj == nil {
+		return
+	}
+	if rs.applied == nil {
+		rs.applied = map[string]*unstructured.Unstructured{}
+	}
+	rs.applied[resourceKey(obj)] = obj
 }
 
 func newReconcileScope(graph *unstructured.Unstructured, watcher *watches.GraphWatcher, metricStore *MetricStore) *reconcileScope {
@@ -405,6 +423,16 @@ func (r *GraphReconciler) reconcilePrune(
 		r.pruneStaleMetrics(ctx, rs, dag, supersededRevisions)
 	}
 	cluster := r.cluster()
+
+	// Release field managers of nodes that no longer write an object some
+	// other current node still writes (renamed/removed/excluded nodes and
+	// the legacy per-Graph manager). Prune below only sees objects that
+	// left the applied set entirely.
+	if err := cluster.releaseStaleNodeManagers(ctx, rs, appliedKeys, summary.ConflictNodes); err != nil {
+		logger.Error(err, "releasing stale field managers")
+		result.pending = true
+	}
+
 	allPreviousKeys := map[string]Applied{}
 	logger.V(1).Info("prune gate open", "superseded", len(supersededRevisions))
 
@@ -424,6 +452,9 @@ func (r *GraphReconciler) reconcilePrune(
 	// that may not yet be in the informer cache.
 	supersededDAGs := map[string]*dagpkg.DAG{}
 	for key, a := range extractStaticKeysFromRevisions(supersededRevisions, rs.namespace, cluster.scope) {
+		if existing, ok := allPreviousKeys[key]; ok && existing.NodeType == graphpkg.NodeTypeTemplate {
+			continue // template classification wins for shared objects
+		}
 		allPreviousKeys[key] = a
 	}
 	for _, rev := range supersededRevisions {

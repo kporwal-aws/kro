@@ -94,7 +94,7 @@ func TestSurgicalReleasePatchForceApply(t *testing.T) {
 	require.NoError(t, waitForSettle(ctx, k8sClient, gvk, key))
 
 	// Poll until surgical release has completed (may fire on subsequent reconcile).
-	graphManager := graphName + "." + ns + ".internal.kro.run"
+	graphManager := nodeFieldManager("target", graphName, ns)
 	err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 30*time.Second, true, func(pollCtx context.Context) (bool, error) {
 		cm := &unstructured.Unstructured{}
 		cm.SetGroupVersionKind(gvk)
@@ -529,7 +529,7 @@ func TestSurgicalReleaseTeardown(t *testing.T) {
 		"external-manager's non-overlapping field must survive teardown")
 
 	// Verify kro's field manager is gone from managedFields.
-	graphManager := graphName + "." + ns + ".internal.kro.run"
+	graphManager := nodeFieldManager("target", graphName, ns)
 	for _, mf := range result.GetManagedFields() {
 		assert.NotEqual(t, graphManager, mf.Manager,
 			"kro's field manager should be removed after Graph deletion")

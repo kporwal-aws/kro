@@ -124,7 +124,6 @@ func (c *clusterAccess) pruneResources(
 		ProtectedKeys:      finResult.ProtectedKeys,
 		CompletedTargets:   finResult.CompletedTargets,
 		ChildKeysToCleanup: finResult.ChildKeysToCleanup,
-		FieldOwner:         graphFieldOwner(rs.graph),
 		KeyToNodeID:        keyToNodeID,
 		DAGs:               dags,
 	}
@@ -225,7 +224,7 @@ func (c *clusterAccess) pruneResources(
 			return pi > pj
 		})
 	}
-	c.cleanupFinalizationChildren(ctx, deferredDeletes, opts.FieldOwner)
+	c.cleanupFinalizationChildren(ctx, deferredDeletes, rs)
 
 	return result
 }
@@ -236,12 +235,11 @@ func (c *clusterAccess) pruneResources(
 
 // pruneOpts carries read-only context from finalization into pruneCandidate.
 type pruneOpts struct {
-	ProtectedKeys      map[string]bool               // keys to skip (active finalization children)
-	CompletedTargets   map[string]bool               // targets whose finalization is done
+	ProtectedKeys      map[string]bool                // keys to skip (active finalization children)
+	CompletedTargets   map[string]bool                // targets whose finalization is done
 	ChildKeysToCleanup map[string][]finalizationChild // target key → children to clean up after target
-	FieldOwner         client.FieldOwner             // field manager name for this graph
-	KeyToNodeID        map[string]string             // resource key → DAG node ID
-	DAGs               []*dagpkg.DAG                 // all DAGs for finalizer lookup
+	KeyToNodeID        map[string]string              // resource key → DAG node ID
+	DAGs               []*dagpkg.DAG                  // all DAGs for finalizer lookup
 }
 
 // pruneCandidateResult carries the outcome of processing a single candidate.
@@ -274,12 +272,15 @@ func (c *clusterAccess) pruneCandidate(
 	// Dispatch based on NodeType.
 	switch candidate.NodeType {
 	case graphpkg.NodeTypePatch:
-		// Patch keys use release apply (release fields), not delete.
+		// Patch keys use release apply (release fields), not delete. No
+		// current node writes this object, so every field manager of this
+		// Graph on it is released — the pruned node's, any sibling's, and
+		// the legacy per-Graph manager's.
 		gvk, nn := parseResourceKey(key)
 		if gvk.Kind == "" {
 			return pruneCandidateResult{}
 		}
-		if _, err := releaseApply(ctx, c.client, gvk, nn.Namespace, nn.Name, opts.FieldOwner, candidate.HasStatus); err != nil {
+		if err := c.releaseGraphManagers(ctx, gvk, nn.Namespace, nn.Name, rs.name, rs.namespace); err != nil {
 			// Classify release errors per 005-reconciliation.md § Teardown:
 			// - 422 Invalid (immutable field) → abandon, will never succeed
 			// - Everything else (403, 409, 5xx, network) → propagate for retry
@@ -456,6 +457,7 @@ func (c *clusterAccess) findManagedResourceKeys(ctx context.Context, rs *reconci
 
 		for _, item := range list.Items {
 			itemLabels := item.GetLabels()
+			var found Applied
 			for labelKey, labelValue := range itemLabels {
 				if strings.HasSuffix(labelKey, suffix) {
 					rk := resourceKey(&item)
@@ -464,14 +466,22 @@ func (c *clusterAccess) findManagedResourceKeys(ctx context.Context, rs *reconci
 						nodeType = nt
 					}
 					nodeID, _ := graphpkg.ParseNodeIDFromLabel(labelKey)
-					keys = append(keys, Applied{
+					found = Applied{
 						Key:       rk,
 						NodeID:    nodeID,
 						NodeType:  nodeType,
 						HasStatus: false, // unknown from labels
-					})
-					break
+					}
+					// A template label on the same object takes precedence
+					// over patch labels from sibling nodes: the template is
+					// the lifecycle owner.
+					if nodeType == graphpkg.NodeTypeTemplate {
+						break
+					}
 				}
+			}
+			if found.Key != "" {
+				keys = append(keys, found)
 			}
 		}
 	}

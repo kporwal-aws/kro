@@ -2507,17 +2507,28 @@ func patchReleaseTestSetup(t *testing.T, patchErr error) (*clusterAccess, *recon
 		},
 	}}
 
+	seeding := true
 	fakeClient := fake.NewClientBuilder().
 		WithObjects(target).
+		WithReturnManagedFields().
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, client client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				if patchErr != nil {
+				if patchErr != nil && !seeding {
 					return patchErr
 				}
 				return client.Patch(ctx, obj, patch, opts...)
 			},
 		}).
 		Build()
+
+	// Write the identity label under the patch node's own field manager, as
+	// a real apply would. Release targets the Graph's managers on the object.
+	seed := target.DeepCopy()
+	seed.SetResourceVersion("")
+	seed.SetManagedFields(nil)
+	require.NoError(t, fakeClient.Patch(context.Background(), seed, client.Apply,
+		client.FieldOwner("mypatch."+graphName+"."+graphNS+".internal.kro.run")))
+	seeding = false
 
 	cluster := &clusterAccess{
 		client: fakeClient,

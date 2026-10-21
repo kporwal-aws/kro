@@ -12,8 +12,12 @@ package graphcontroller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,19 +45,108 @@ type clusterAccess struct {
 // SSA configuration
 // ---------------------------------------------------------------------------
 
-// graphFieldOwner returns the SSA field manager identity for a Graph.
-// Per the design (003-ownership): <name>.<namespace>.internal.kro.run
-func graphFieldOwner(graph *unstructured.Unstructured) client.FieldOwner {
-	return client.FieldOwner(graph.GetName() + "." + graph.GetNamespace() + ".internal.kro.run")
+// Field managers. Per the design (003-ownership § Field Manager), every
+// template:/patch: node applies under its own SSA field manager:
+//
+//	<node>.<graph>.<namespace>.internal.kro.run
+//
+// SSA treats a manager's apply as its complete intent for the object, so
+// nodes that write the same object must not share a manager or each apply
+// releases the other's fields and the object is rewritten on every reconcile.
+// Status subresource applies use the same name plus ".status".
+//
+// Before per-node managers, every node of a Graph applied under the per-Graph
+// manager <graph>.<namespace>.internal.kro.run. That name is still recognized
+// as the Graph's own (never a third party) so objects written by an older
+// controller migrate: conflicting claims are taken over on apply, and the
+// entry is released once the object's current writers have applied.
+const (
+	fieldManagerDomain  = ".internal.kro.run"
+	statusManagerSuffix = ".status"
+	// maxFieldManagerLen is the API server's limit on fieldManager length.
+	maxFieldManagerLen = 128
+)
+
+// legacyGraphFieldManager returns the per-Graph field manager used before
+// field managers became per-node. Every per-node manager of the Graph ends
+// with "." + this name.
+func legacyGraphFieldManager(graphName, namespace string) string {
+	return graphName + "." + namespace + fieldManagerDomain
 }
 
-// thirdPartyFieldManagers returns field manager names on the resource that are
-// not this Graph's own manager and not the API server's defaulting manager.
-// Only SSA Apply managers are considered — Update managers (from kubectl edit,
-// plain client.Update, etc.) don't declare field ownership and shouldn't block
-// apply. Per 003-ownership.md: used by the dry-run conflict check and
-// force-apply eviction path to detect field co-ownership.
-func thirdPartyFieldManagers(obj *unstructured.Unstructured, ownFieldManager string) []string {
+// nodeFieldOwner returns the SSA field manager for one node of a Graph.
+// forEach children use their parent node's manager: children of one node
+// always target distinct objects, so the (manager, object) pair is already
+// unique per child. Node IDs are DNS labels (no dots), which keeps the node
+// segment unambiguous. If the name would exceed the API server's limit
+// (with room for the status suffix), the node segment is replaced by a
+// short, stable, dot-free hash of the node ID.
+func nodeFieldOwner(graphName, namespace, nodeID string) client.FieldOwner {
+	base := legacyGraphFieldManager(graphName, namespace)
+	segment := nodeID
+	if len(segment)+1+len(base)+len(statusManagerSuffix) > maxFieldManagerLen {
+		sum := sha256.Sum256([]byte(nodeID))
+		segment = "n" + hex.EncodeToString(sum[:6])
+	}
+	return client.FieldOwner(segment + "." + base)
+}
+
+// graphManagerBase reports whether manager belongs to the given Graph (any
+// node's manager, the legacy per-Graph manager, or a status sub-manager of
+// either) and returns the base manager name with any status suffix removed.
+func graphManagerBase(manager, graphName, namespace string) (string, bool) {
+	legacy := legacyGraphFieldManager(graphName, namespace)
+	base := manager
+	if strings.HasSuffix(manager, fieldManagerDomain+statusManagerSuffix) {
+		base = strings.TrimSuffix(manager, statusManagerSuffix)
+	}
+	if base == legacy {
+		return base, true
+	}
+	segment, ok := strings.CutSuffix(base, "."+legacy)
+	if !ok || segment == "" || strings.Contains(segment, ".") {
+		return "", false
+	}
+	return base, true
+}
+
+// isGraphFieldManager reports whether manager belongs to the given Graph.
+func isGraphFieldManager(manager, graphName, namespace string) bool {
+	_, ok := graphManagerBase(manager, graphName, namespace)
+	return ok
+}
+
+// graphManagerEntries returns the Graph's base manager names present on obj
+// as Apply entries, mapped to whether the manager also has a status
+// subresource entry.
+func graphManagerEntries(obj *unstructured.Unstructured, graphName, namespace string) map[string]bool {
+	var out map[string]bool
+	for _, mf := range obj.GetManagedFields() {
+		if mf.Operation != metav1.ManagedFieldsOperationApply {
+			continue
+		}
+		base, ok := graphManagerBase(mf.Manager, graphName, namespace)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[base] = out[base] || mf.Subresource == "status"
+	}
+	return out
+}
+
+// thirdPartyFieldManagers returns field manager names on the resource that do
+// not belong to this Graph and are not the API server's defaulting manager.
+// Managers of sibling nodes of the same Graph, and the legacy per-Graph
+// manager, are the Graph's own: two nodes writing one object are not
+// co-owners in the conflict sense, and evicting a sibling would delete its
+// fields. Only SSA Apply managers are considered — Update managers (from
+// kubectl edit, plain client.Update, etc.) don't declare field ownership and
+// shouldn't block apply. Per 003-ownership.md: used by the dry-run conflict
+// check and force-apply eviction path to detect field co-ownership.
+func thirdPartyFieldManagers(obj *unstructured.Unstructured, graphName, graphNamespace string) []string {
 	managedFields := obj.GetManagedFields()
 	if len(managedFields) == 0 {
 		return nil
@@ -67,8 +160,8 @@ func thirdPartyFieldManagers(obj *unstructured.Unstructured, ownFieldManager str
 		if mf.Operation != metav1.ManagedFieldsOperationApply {
 			continue
 		}
-		// Exclude our own field manager and its status sub-manager
-		if manager == ownFieldManager || manager == ownFieldManager+".status" {
+		// Exclude this Graph's managers (every node, legacy, and status sub-managers).
+		if isGraphFieldManager(manager, graphName, graphNamespace) {
 			continue
 		}
 		// Exclude the API server's defaulting field managers
@@ -78,6 +171,38 @@ func thirdPartyFieldManagers(obj *unstructured.Unstructured, ownFieldManager str
 		thirdParty = append(thirdParty, manager)
 	}
 	return thirdParty
+}
+
+// onlyConflictsWith reports whether err is an SSA apply conflict whose every
+// conflicting manager is manager or its status sub-manager.
+func onlyConflictsWith(err error, manager string) bool {
+	var status apierrors.APIStatus
+	if !apierrors.IsConflict(err) || !errors.As(err, &status) {
+		return false
+	}
+	details := status.Status().Details
+	if details == nil || len(details.Causes) == 0 {
+		return false
+	}
+	for _, cause := range details.Causes {
+		if cause.Type != metav1.CauseTypeFieldManagerConflict {
+			return false
+		}
+		// Message format: conflict with "<manager>"[ with subresource "..."][ using ...]
+		rest, ok := strings.CutPrefix(cause.Message, "conflict with ")
+		if !ok {
+			return false
+		}
+		quoted, err := strconv.QuotedPrefix(rest)
+		if err != nil {
+			return false
+		}
+		name, err := strconv.Unquote(quoted)
+		if err != nil || (name != manager && name != manager+statusManagerSuffix) {
+			return false
+		}
+	}
+	return true
 }
 
 // isAPIServerManager returns true if the field manager name belongs to the
@@ -118,7 +243,7 @@ func (c *clusterAccess) deleteByKeys(ctx context.Context, keys []string) {
 // cleanupFinalizationChildren dispatches cleanup for finalization children by
 // node type: template children are deleted, patch children are release-applied
 // (releasing SSA field ownership so the fields persist but kro no longer claims them).
-func (c *clusterAccess) cleanupFinalizationChildren(ctx context.Context, children []finalizationChild, fieldOwner client.FieldOwner) {
+func (c *clusterAccess) cleanupFinalizationChildren(ctx context.Context, children []finalizationChild, rs *reconcileScope) {
 	logger := log.FromContext(ctx)
 	for _, child := range children {
 		switch child.NodeType {
@@ -127,7 +252,7 @@ func (c *clusterAccess) cleanupFinalizationChildren(ctx context.Context, childre
 			if gvk.Kind == "" {
 				continue
 			}
-			if _, err := releaseApply(ctx, c.client, gvk, nn.Namespace, nn.Name, fieldOwner, false); err != nil {
+			if err := c.releaseGraphManagers(ctx, gvk, nn.Namespace, nn.Name, rs.name, rs.namespace); err != nil {
 				if client.IgnoreNotFound(err) != nil {
 					logger.V(1).Info("finalizer patch release failed", "key", child.Key, "error", err)
 				}
@@ -177,27 +302,37 @@ func (c *clusterAccess) applySSA(ctx context.Context, rs *reconcileScope, evalMa
 	if err := checkOwnership(ctx, c, obj, rs, nodeType); err != nil {
 		return nil, err
 	}
+	fieldOwner := nodeFieldOwner(rs.name, rs.namespace, nodeID)
+	legacy := legacyGraphFieldManager(rs.name, rs.namespace)
 	if !forceApply {
-		if err := dryRunSSA(ctx, c.client, obj, graphFieldOwner(rs.graph), nodeType, rs.name, rs.namespace); err != nil {
+		if err := dryRunSSA(ctx, c.client, obj, fieldOwner, nodeType, rs.name, rs.namespace); err != nil {
 			return nil, err
 		}
 	}
-	applied, err := ssaWrite(ctx, c.client, obj, graphFieldOwner(rs.graph), forceApply)
+	applied, err := ssaWrite(ctx, c.client, obj, fieldOwner, forceApply)
+	if err != nil && !forceApply && onlyConflictsWith(err, legacy) {
+		// The object was written by a controller that predates per-node
+		// field managers and the node now declares a different value for a
+		// field the legacy per-Graph manager owns. That claim is this Graph's
+		// own, so take it over rather than surfacing a Conflict.
+		applied, err = ssaWrite(ctx, c.client, obj, fieldOwner, true)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if forceApply && nodeType == graphpkg.NodeTypeTemplate {
-		applied, err = evictThirdPartyManagers(ctx, c.client, applied, rs.graph, evalMap, nodeID)
+		applied, err = evictThirdPartyManagers(ctx, c.client, applied, rs, evalMap, nodeID)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if forceApply && nodeType == graphpkg.NodeTypePatch {
-		applied, err = surgicalReleaseThirdPartyManagers(ctx, c.client, applied, rs.graph, nodeID)
+		applied, err = surgicalReleaseThirdPartyManagers(ctx, c.client, applied, rs, nodeID)
 		if err != nil {
 			return nil, err
 		}
 	}
+	rs.recordApplied(applied)
 	return applied, nil
 }
 
@@ -228,7 +363,14 @@ func dryRunSSA(ctx context.Context, c client.Client, obj *unstructured.Unstructu
 	dryRunCopy.SetName(obj.GetName())
 	dryRunCopy.SetNamespace(obj.GetNamespace())
 
-	if err := c.Patch(ctx, dryRunCopy, client.RawPatch(types.ApplyPatchType, data), fieldOwner, client.DryRunAll); err != nil {
+	err = c.Patch(ctx, dryRunCopy, client.RawPatch(types.ApplyPatchType, data), fieldOwner, client.DryRunAll)
+	if err != nil && onlyConflictsWith(err, legacyGraphFieldManager(graphName, graphNamespace)) {
+		// Conflicts only with this Graph's legacy per-Graph manager: the real
+		// apply takes those fields over (see applySSA). Re-run the dry-run with
+		// force so the checks below see the post-takeover state.
+		err = c.Patch(ctx, dryRunCopy, client.RawPatch(types.ApplyPatchType, data), fieldOwner, client.DryRunAll, client.ForceOwnership)
+	}
+	if err != nil {
 		if apierrors.IsConflict(err) {
 			return fmt.Errorf("SSA dry-run conflict on %s/%s %s: %w: %w",
 				obj.GetAPIVersion(), obj.GetKind(), obj.GetName(), ErrFieldConflict, err)
@@ -246,11 +388,11 @@ func dryRunSSA(ctx context.Context, c client.Client, obj *unstructured.Unstructu
 	}
 
 	// Check 2: Field exclusivity — no field-level co-ownership with other Apply-type managers.
-	managers := thirdPartyFieldManagers(dryRunCopy, string(fieldOwner))
+	managers := thirdPartyFieldManagers(dryRunCopy, graphName, graphNamespace)
 	if len(managers) > 0 {
 		// Check field-level overlap — disjoint managers on the same object is fine.
 		kroFields := extractFieldsV1(dryRunCopy, string(fieldOwner))
-		kroStatusFields := extractFieldsV1(dryRunCopy, string(fieldOwner)+".status")
+		kroStatusFields := extractFieldsV1(dryRunCopy, string(fieldOwner)+statusManagerSuffix)
 		kroMerged := mergeFieldsTrees(kroFields, kroStatusFields)
 
 		var coOwners []string
@@ -404,7 +546,7 @@ func ssaWrite(ctx context.Context, c client.Client, obj *unstructured.Unstructur
 		// Use a distinct sub-field-manager for the status subresource so the
 		// status-only body does not cause SSA to release main-resource fields
 		// (annotations, labels) owned by the same manager name.
-		statusFieldOwner := client.FieldOwner(string(fieldOwner) + ".status")
+		statusFieldOwner := client.FieldOwner(string(fieldOwner) + statusManagerSuffix)
 		var statusOpts []client.SubResourcePatchOption
 		statusOpts = append(statusOpts, statusFieldOwner)
 		if force {
@@ -432,10 +574,8 @@ func ssaWrite(ctx context.Context, c client.Client, obj *unstructured.Unstructur
 // Apply (eviction release): issue a full release impersonating each third-party
 // manager so their managedFields entry is garbage-collected and their
 // solely-owned fields (e.g., identity labels) are deleted from the object.
-func evictThirdPartyManagers(ctx context.Context, c client.Client, readBack *unstructured.Unstructured, graph *unstructured.Unstructured, evalMap map[string]any, nodeID string) (*unstructured.Unstructured, error) {
-	fieldOwner := graphFieldOwner(graph)
-	ownManager := string(fieldOwner)
-	managers := thirdPartyFieldManagers(readBack, ownManager)
+func evictThirdPartyManagers(ctx context.Context, c client.Client, readBack *unstructured.Unstructured, rs *reconcileScope, evalMap map[string]any, nodeID string) (*unstructured.Unstructured, error) {
+	managers := thirdPartyFieldManagers(readBack, rs.name, rs.namespace)
 	if len(managers) == 0 {
 		return readBack, nil
 	}
@@ -471,10 +611,9 @@ func evictThirdPartyManagers(ctx context.Context, c client.Client, readBack *uns
 // NOTE: This implementation handles struct fields (f: prefix keys in fieldsV1)
 // but does not handle list/map items (k: and v: prefix keys). The sole-ownership
 // invariant for list items is not enforced by surgical release.
-func surgicalReleaseThirdPartyManagers(ctx context.Context, c client.Client, readBack *unstructured.Unstructured, graph *unstructured.Unstructured, nodeID string) (*unstructured.Unstructured, error) {
-	fieldOwner := graphFieldOwner(graph)
-	ownManager := string(fieldOwner)
-	managers := thirdPartyFieldManagers(readBack, ownManager)
+func surgicalReleaseThirdPartyManagers(ctx context.Context, c client.Client, readBack *unstructured.Unstructured, rs *reconcileScope, nodeID string) (*unstructured.Unstructured, error) {
+	ownManager := string(nodeFieldOwner(rs.name, rs.namespace, nodeID))
+	managers := thirdPartyFieldManagers(readBack, rs.name, rs.namespace)
 	if len(managers) == 0 {
 		return readBack, nil
 	}
@@ -484,9 +623,9 @@ func surgicalReleaseThirdPartyManagers(ctx context.Context, c client.Client, rea
 	namespace := readBack.GetNamespace()
 	name := readBack.GetName()
 
-	// Extract kro's fieldsV1 (main + status sub-manager).
+	// Extract this node's fieldsV1 (main + status sub-manager).
 	kroFields := extractFieldsV1(readBack, ownManager)
-	kroStatusFields := extractFieldsV1(readBack, ownManager+".status")
+	kroStatusFields := extractFieldsV1(readBack, ownManager+statusManagerSuffix)
 	kroMerged := mergeFieldsTrees(kroFields, kroStatusFields)
 
 	for _, mgr := range managers {
@@ -821,4 +960,81 @@ func releaseApply(ctx context.Context, c client.Client, gvk schema.GroupVersionK
 		return nil, fmt.Errorf("release apply for %s/%s: %w", namespace, name, err)
 	}
 	return result, nil
+}
+
+// releaseGraphManagers issues a full release under every field manager of the
+// given Graph present on the object: each node's manager, the legacy
+// per-Graph manager, and their status sub-managers. Used when no current node
+// writes the object (patch prune, teardown, finalizer patch cleanup), so every
+// field the Graph claimed on it is released. A missing object is not an error.
+func (c *clusterAccess) releaseGraphManagers(ctx context.Context, gvk schema.GroupVersionKind, namespace, name, graphName, graphNamespace string) error {
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(gvk)
+	if err := c.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("reading %s/%s before release: %w", namespace, name, err)
+	}
+	for manager, hasStatus := range graphManagerEntries(live, graphName, graphNamespace) {
+		if _, err := releaseApply(ctx, c.client, gvk, namespace, name, client.FieldOwner(manager), hasStatus); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// releaseStaleNodeManagers releases this Graph's field managers that remain
+// on an object the current walk wrote but that belong to none of the object's
+// current writers: a node that was renamed, removed, or excluded while
+// another node still writes the object, or the legacy per-Graph manager on an
+// object written by an older controller. Prune cannot see these because the
+// object's key is still in the applied set. Managers of nodes in Conflict are
+// kept (their claim is unresolved, not withdrawn), and while any node is in
+// Conflict the legacy manager is kept too, since it may hold that node's
+// fields. Callers must only invoke this once every node has settled (no
+// Pending, Blocked, or Error nodes), so each current writer has applied under
+// its own manager and a release deletes only fields no current node declares.
+//
+// The check reads the managedFields returned by this walk's applies, so a
+// settled Graph makes no API calls here.
+func (c *clusterAccess) releaseStaleNodeManagers(ctx context.Context, rs *reconcileScope, appliedKeys []Applied, conflictNodes []string) error {
+	if len(rs.applied) == 0 {
+		return nil
+	}
+	writers := map[string]map[string]bool{}
+	for _, a := range appliedKeys {
+		if a.Key == "" || a.NodeID == "" {
+			continue
+		}
+		if writers[a.Key] == nil {
+			writers[a.Key] = map[string]bool{}
+		}
+		writers[a.Key][string(nodeFieldOwner(rs.name, rs.namespace, a.NodeID))] = true
+	}
+	keep := map[string]bool{}
+	for _, id := range conflictNodes {
+		keep[string(nodeFieldOwner(rs.name, rs.namespace, id))] = true
+	}
+	if len(conflictNodes) > 0 {
+		keep[legacyGraphFieldManager(rs.name, rs.namespace)] = true
+	}
+
+	logger := log.FromContext(ctx)
+	for key, obj := range rs.applied {
+		current := writers[key]
+		if len(current) == 0 {
+			continue
+		}
+		for manager, hasStatus := range graphManagerEntries(obj, rs.name, rs.namespace) {
+			if current[manager] || keep[manager] {
+				continue
+			}
+			if _, err := releaseApply(ctx, c.client, obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName(), client.FieldOwner(manager), hasStatus); err != nil {
+				return fmt.Errorf("releasing stale field manager %q on %s: %w", manager, key, err)
+			}
+			logger.Info("released stale field manager", "manager", manager, "key", key)
+		}
+	}
+	return nil
 }
