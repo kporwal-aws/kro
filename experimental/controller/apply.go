@@ -798,11 +798,17 @@ func fieldsOverlap(a, b map[string]any) bool {
 		// Both have key k
 		aMap, aIsMap := v.(map[string]any)
 		bMap, bIsMap := bVal.(map[string]any)
-		if !aIsMap || len(aMap) == 0 {
-			return true // a is leaf at k, b also has k → overlap
+		aLeaf := !aIsMap || len(aMap) == 0
+		bLeaf := !bIsMap || len(bMap) == 0
+		if aLeaf && bLeaf {
+			return true // both own the field itself → overlap
 		}
-		if !bIsMap || len(bMap) == 0 {
-			return true // b is leaf at k, a has subtree at k → b owns all → overlap
+		if aLeaf != bLeaf {
+			// One side tracks children under k, so k is a granular map or
+			// struct and the leaf side owns only its presence (for example
+			// "f:status": {} left by applying "status": {}). Owning a
+			// field's presence does not co-own the other side's children.
+			continue
 		}
 		// Both are subtrees → recurse
 		if fieldsOverlap(aMap, bMap) {
@@ -1004,15 +1010,7 @@ func releaseApply(ctx context.Context, c client.Client, gvk schema.GroupVersionK
 		return nil, fmt.Errorf("checking existence before release apply for %s/%s: %w", namespace, name, err)
 	}
 
-	release := identityBody(gvk, namespace, name)
-	if hasStatus {
-		// Include "status": {} so SSA releases all previously-owned status fields.
-		// An identity-only release body (apiVersion/kind/metadata) is ignored by
-		// the status endpoint — no fields are claimed, so no ownership is released.
-		release["status"] = map[string]any{}
-	}
-
-	obj := &unstructured.Unstructured{Object: release}
+	obj := &unstructured.Unstructured{Object: identityBody(gvk, namespace, name)}
 	obj.SetGroupVersionKind(gvk)
 
 	result, err := ssaWrite(ctx, c, obj, fieldOwner, false)
@@ -1023,7 +1021,31 @@ func releaseApply(ctx context.Context, c client.Client, gvk schema.GroupVersionK
 		}
 		return nil, fmt.Errorf("release apply for %s/%s: %w", namespace, name, err)
 	}
-	return result, nil
+	if !hasStatus {
+		return result, nil
+	}
+
+	// Release the status sub-manager with an identity-only body on the status
+	// endpoint: an apply that claims nothing releases every status field the
+	// manager owned. The body must not carry "status": {} — that would claim
+	// status itself, leaving a managedFields entry that owns f:status, which
+	// other writers' co-ownership checks then see as covering all of status.
+	data, err := json.Marshal(identityBody(gvk, namespace, name))
+	if err != nil {
+		return nil, fmt.Errorf("marshaling status release: %w", err)
+	}
+	statusObj := &unstructured.Unstructured{}
+	statusObj.SetGroupVersionKind(gvk)
+	statusObj.SetName(name)
+	statusObj.SetNamespace(namespace)
+	if err := c.Status().Patch(ctx, statusObj, client.RawPatch(types.ApplyPatchType, data),
+		client.FieldOwner(string(fieldOwner)+statusManagerSuffix)); err != nil {
+		if apierrors.IsNotFound(err) {
+			return result, nil
+		}
+		return nil, fmt.Errorf("status release apply for %s/%s: %w", namespace, name, err)
+	}
+	return statusObj, nil
 }
 
 // releaseGraphManagers issues a full release under every field manager of the

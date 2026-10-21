@@ -18,6 +18,7 @@ package graphcontroller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -225,7 +226,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// -----------------------------------------------------------------------
 	// 8. Prune removed resources
 	// -----------------------------------------------------------------------
-	pr := r.reconcilePrune(ctx, rs, rev.state, rev.eval, rev.dag, wp.keys, rev.supersededRevisions, &wp.summary)
+	pr := r.reconcilePrune(ctx, rs, rev.state, rev.eval, rev.dag, wp.plan, wp.keys, rev.supersededRevisions, &wp.summary)
 
 	// -----------------------------------------------------------------------
 	// 9. Update status
@@ -403,6 +404,7 @@ func (r *GraphReconciler) reconcilePrune(
 	state *instanceState,
 	eval *evaluator,
 	dag *dagpkg.DAG,
+	plan *PlanState,
 	appliedKeys []Applied,
 	supersededRevisions []*unstructured.Unstructured,
 	summary *PlanSummary,
@@ -474,6 +476,7 @@ func (r *GraphReconciler) reconcilePrune(
 		currentSet[a.Key] = a
 	}
 	candidates := collectPruneCandidates(allPreviousKeys, currentSet)
+	candidates = filterDeclaredCandidates(ctx, candidates, dag, plan, rs.namespace, cluster.scope)
 	allDAGs := []*dagpkg.DAG{}
 	if dag != nil {
 		allDAGs = append(allDAGs, dag)
@@ -542,4 +545,60 @@ func (r *GraphReconciler) pruneStaleMetrics(ctx context.Context, rs *reconcileSc
 			}
 		}
 	}
+}
+
+// filterDeclaredCandidates removes prune candidates that a node of the active
+// revision still declares, so prune never deletes (or releases) an object
+// whose node is present and merely failed to converge this reconcile. A
+// candidate is kept out of prune, fail closed, when either:
+//
+//   - its static resource key matches a node of the active revision that was
+//     not excluded by includeWhen, or
+//   - its identity label names a node of the active revision whose state is
+//     neither Ready, NotReady nor Excluded (for example Conflict).
+//
+// Pending, Blocked and Error nodes already close the prune gate entirely;
+// Conflict does not, which without this filter turns a field conflict on a
+// template: node into a delete of the live object it manages. Objects of
+// excluded nodes, removed nodes, and forEach items that are no longer
+// produced remain prunable.
+func filterDeclaredCandidates(ctx context.Context, candidates []Applied, dag *dagpkg.DAG, plan *PlanState, namespace string, scope *scopeResolver) []Applied {
+	if dag == nil || plan == nil || len(candidates) == 0 {
+		return candidates
+	}
+	staticKeyNode := map[string]string{}
+	nodeByID := map[string]string{} // lower-cased ID → ID (identity labels are lower-cased)
+	for _, n := range dag.Nodes {
+		if n.Finalizes != "" {
+			continue
+		}
+		nodeByID[strings.ToLower(n.ID)] = n.ID
+		if n.Identity() == nil {
+			continue
+		}
+		if rk := staticResourceKey(n.Identity(), namespace, scope); rk != "" {
+			staticKeyNode[strings.ToLower(rk)] = n.ID
+		}
+	}
+
+	logger := log.FromContext(ctx)
+	kept := candidates[:0:0]
+	for _, c := range candidates {
+		if id, ok := staticKeyNode[strings.ToLower(c.Key)]; ok && plan.States[id] != NodeExcluded {
+			logger.Info("prune skipped: object is declared by a node of the active revision",
+				"key", c.Key, "node", id, "state", plan.States[id].String())
+			continue
+		}
+		if id, ok := nodeByID[strings.ToLower(c.NodeID)]; ok && c.NodeID != "" {
+			switch st := plan.States[id]; st {
+			case NodeReady, NodeNotReady, NodeExcluded:
+			default:
+				logger.Info("prune skipped: object's node is in the active revision and did not converge",
+					"key", c.Key, "node", id, "state", st.String())
+				continue
+			}
+		}
+		kept = append(kept, c)
+	}
+	return kept
 }

@@ -1,6 +1,8 @@
 package graphcontroller
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -95,4 +97,31 @@ func TestOnlyConflictsWith(t *testing.T) {
 	assert.False(t, onlyConflictsWith(conflict(`"kubectl" using v1 at 2024-01-01T00:00:00Z`), legacy))
 	assert.False(t, onlyConflictsWith(apierrors.NewApplyConflict(nil, "no causes"), legacy))
 	assert.False(t, onlyConflictsWith(fmt.Errorf("not an API error"), legacy))
+}
+
+// TestReleaseApplyStatusClaimsNothing: the status release must be an
+// identity-only body. Sending "status": {} claims status itself, leaving an
+// entry that owns f:status, which other writers then see as a co-owner of
+// every status field.
+func TestReleaseApplyStatusClaimsNothing(t *testing.T) {
+	c, main, status := capturePatches(t, newClusterWidget("w"))
+	_, err := releaseApply(context.Background(), c, clusterWidgetGVK, "", "w", "mgr", true)
+	assert.NoError(t, err)
+	for _, body := range append(append([][]byte{}, *main...), *status...) {
+		var m map[string]any
+		assert.NoError(t, json.Unmarshal(body, &m))
+		assert.NotContains(t, m, "status", "release body must not claim status: %s", body)
+	}
+	assert.Len(t, *status, 1)
+}
+
+func TestFieldsOverlap_PresenceLeafDoesNotCoverChildren(t *testing.T) {
+	presence := map[string]any{"f:status": map[string]any{}}
+	items := map[string]any{"f:status": map[string]any{"f:items": map[string]any{}}}
+	conditions := map[string]any{"f:status": map[string]any{"f:conditions": map[string]any{}}}
+	assert.False(t, fieldsOverlap(presence, items))
+	assert.False(t, fieldsOverlap(items, presence))
+	assert.False(t, fieldsOverlap(items, conditions))
+	assert.True(t, fieldsOverlap(items, items))
+	assert.True(t, fieldsOverlap(presence, presence), "two owners of the same leaf overlap")
 }

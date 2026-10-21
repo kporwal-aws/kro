@@ -63,11 +63,17 @@ type Environment struct {
 	// available after Start returns.
 	ControllerPID int
 
+	// BinaryPath, if set, is a prebuilt controller binary to run instead of
+	// building one from this module (e.g. a previous release built with
+	// BuildBinaryAtRef, for upgrade tests).
+	BinaryPath string
+
 	testEnv        *envtest.Environment
 	restConfig     *rest.Config
 	binaryCmd      *exec.Cmd
 	binaryDied     chan error
 	kubeconfigPath string
+	logWriter      io.Writer
 	logFile        *os.File // only set if we created it
 }
 
@@ -77,9 +83,13 @@ func (e *Environment) Start() (*rest.Config, error) {
 	moduleRoot := FindModuleRoot()
 
 	// Build binary.
-	binaryPath, err := buildBinary(moduleRoot)
-	if err != nil {
-		return nil, fmt.Errorf("building binary: %w", err)
+	binaryPath := e.BinaryPath
+	if binaryPath == "" {
+		var err error
+		binaryPath, err = buildBinary(moduleRoot)
+		if err != nil {
+			return nil, fmt.Errorf("building binary: %w", err)
+		}
 	}
 
 	// Set up log writer. If KRO_TEST_TAG is set, per-run log lives at
@@ -91,7 +101,10 @@ func (e *Environment) Start() (*rest.Config, error) {
 		if tag := os.Getenv("KRO_TEST_TAG"); tag != "" {
 			logName = "controller-" + tag + ".log"
 		}
-		logPath := filepath.Join(filepath.Dir(binaryPath), logName)
+		logPath := filepath.Join(moduleRoot, "build", logName)
+		if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+			return nil, fmt.Errorf("creating build dir: %w", err)
+		}
 		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("creating log file: %w", err)
@@ -122,27 +135,105 @@ func (e *Environment) Start() (*rest.Config, error) {
 		return nil, fmt.Errorf("writing kubeconfig: %w", err)
 	}
 
-	// Start binary.
-	healthAddr, metricsAddr, pprofAddr, cmd, err := startBinary(binaryPath, e.kubeconfigPath, logWriter)
-	if err != nil {
+	e.logWriter = logWriter
+	if err := e.startController(binaryPath); err != nil {
 		e.cleanup()
-		return nil, fmt.Errorf("starting binary: %w", err)
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// startController starts a controller subprocess and waits for health.
+func (e *Environment) startController(binaryPath string) error {
+	healthAddr, metricsAddr, pprofAddr, cmd, err := startBinary(binaryPath, e.kubeconfigPath, e.logWriter)
+	if err != nil {
+		return fmt.Errorf("starting binary: %w", err)
 	}
 	e.binaryCmd = cmd
-	e.binaryDied = make(chan error, 1)
-	go func() { e.binaryDied <- cmd.Wait() }()
+	died := make(chan error, 1)
+	e.binaryDied = died
+	go func() { died <- cmd.Wait() }()
 
-	// Wait for health.
-	if err := waitForHealthy(healthAddr, e.binaryDied); err != nil {
-		e.cleanup()
-		return nil, fmt.Errorf("waiting for health: %w", err)
+	if err := waitForHealthy(healthAddr, died); err != nil {
+		return fmt.Errorf("waiting for health: %w", err)
 	}
-
 	e.MetricsAddr = metricsAddr
 	e.PProfAddr = pprofAddr
 	e.ControllerPID = cmd.Process.Pid
+	return nil
+}
 
-	return cfg, nil
+// SwapController stops the running controller and starts binaryPath against
+// the same API server, as an in-place upgrade or rollback would. An empty
+// binaryPath builds the controller from this module.
+func (e *Environment) SwapController(binaryPath string) error {
+	if binaryPath == "" {
+		var err error
+		if binaryPath, err = buildBinary(FindModuleRoot()); err != nil {
+			return fmt.Errorf("building binary: %w", err)
+		}
+	}
+	if e.binaryCmd != nil && e.binaryCmd.Process != nil {
+		stopBinary(e.binaryCmd, e.binaryDied)
+	}
+	return e.startController(binaryPath)
+}
+
+// StartAdditionalController starts a second controller process against the
+// same API server, alongside the running one, as a rolling update briefly
+// does. The returned func stops it.
+func (e *Environment) StartAdditionalController(binaryPath string) (stop func(), err error) {
+	healthAddr, _, _, cmd, err := startBinary(binaryPath, e.kubeconfigPath, e.logWriter)
+	if err != nil {
+		return nil, fmt.Errorf("starting binary: %w", err)
+	}
+	died := make(chan error, 1)
+	go func() { died <- cmd.Wait() }()
+	if err := waitForHealthy(healthAddr, died); err != nil {
+		stopBinary(cmd, died)
+		return nil, fmt.Errorf("waiting for health: %w", err)
+	}
+	return func() { stopBinary(cmd, died) }, nil
+}
+
+// BuildBinaryAtRef builds the controller from the given git ref of the
+// repository containing this module, into dir. Used by upgrade tests to run
+// a previous controller against the same cluster state.
+func BuildBinaryAtRef(ref, dir string) (string, error) {
+	moduleRoot := FindModuleRoot()
+	out, err := exec.Command("git", "-C", moduleRoot, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", fmt.Errorf("finding repository root: %w", err)
+	}
+	repoRoot := strings.TrimSpace(string(out))
+	rel, err := filepath.Rel(repoRoot, moduleRoot)
+	if err != nil {
+		return "", err
+	}
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		return "", err
+	}
+	archive := exec.Command("sh", "-c", `git -C "$1" archive "$2" | tar -x -C "$3"`, "sh", repoRoot, ref, src)
+	archive.Stderr = os.Stderr
+	if err := archive.Run(); err != nil {
+		return "", fmt.Errorf("extracting %s: %w", ref, err)
+	}
+	binaryPath := filepath.Join(dir, "kro-graph-controller")
+	args := []string{"build"}
+	if raceDetectorEnabled {
+		args = append(args, "-race")
+	}
+	args = append(args, "-o", binaryPath, "./cmd/")
+	cmd := exec.Command("go", args...)
+	cmd.Dir = filepath.Join(src, rel)
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("go build at %s: %w", ref, err)
+	}
+	return binaryPath, nil
 }
 
 // Client returns a controller-runtime client configured for the envtest

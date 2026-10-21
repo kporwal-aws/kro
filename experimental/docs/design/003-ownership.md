@@ -67,6 +67,16 @@ writers have all applied under their own managers, the per-Graph manager is rele
 stale node manager. That release deletes only fields no current node declares. While any node is
 in Conflict, the per-Graph manager is kept, because it may hold that node's fields.
 
+**The migration is one-way, and controller versions must not overlap.** A controller that predates
+per-node managers recognizes only `<name>.<namespace>.internal.kro.run` as its own. It sees every
+per-node manager as a third-party co-owner of the same fields, so its dry-run reports Conflict on
+every node, and its prune then deletes the resources of conflicted `template:` nodes. That older
+prune lacked the guard described under [Deletion](#deletion). The same happens if an old and a new
+controller run at once, which a rolling update of a controller without leader election does for
+as long as both pods are up. Upgrade with the old controller fully stopped first (the chart's
+Deployment uses the `Recreate` strategy). Do not roll back to a controller that predates per-node
+managers once the new one has written any resource.
+
 Applies default to non-force SSA. On 409, the Graph surfaces the conflict and stops reconciling
 that resource — silent field takeover is a misconfiguration, not a feature.
 
@@ -249,10 +259,18 @@ SSA field manager names are unauthenticated strings — any client with write ac
 any manager identity. This enables both eviction and surgical release.
 
 The release always targets the main resource; if the node wrote status fields, an additional
-release targets the status subresource. If the release returns 404, the resource is already gone —
+release targets the status subresource. Both release bodies carry only identity fields. A status
+release must not send `"status": {}`: that claims `status` itself and leaves an entry owning
+`f:status`, which other writers' co-ownership checks would read as covering every status field.
+For the same reason, the co-ownership check does not treat a manager that owns only a field's
+presence (an empty `f:<field>` entry) as co-owning another manager's children of that field. If the release returns 404, the resource is already gone —
 release succeeds. Other failures retry on the next reconcile.
 
 ## Deletion
+
+Prune never deletes a resource that a node of the active revision still declares, whatever the
+resource's labels or managedFields say. A `template:` node in Conflict keeps its resource; the
+conflict is surfaced and retried (see 005-reconciliation § Prune).
 
 When a `template:` resource is pruned or torn down, the controller deletes it unconditionally (after
 verifying identity labels to confirm ownership). Field managers on the resource do not block
