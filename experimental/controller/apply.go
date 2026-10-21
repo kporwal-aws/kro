@@ -299,7 +299,9 @@ func (c *clusterAccess) applySSA(ctx context.Context, rs *reconcileScope, evalMa
 	if err != nil {
 		return nil, err
 	}
-	registerWatch(rs, nodeID, obj)
+	if err := registerWatch(rs, c.scope, nodeID, obj); err != nil {
+		return nil, err
+	}
 	if err := checkOwnership(ctx, c, obj, rs, nodeType); err != nil {
 		return nil, err
 	}
@@ -514,12 +516,20 @@ func normalizeSecretStringData(obj map[string]any) {
 }
 
 // registerWatch buffers a watch for the resource so that changes trigger
-// re-reconciliation. The watch is flushed at done(true).
-func registerWatch(rs *reconcileScope, nodeID string, obj *unstructured.Unstructured) {
-	gvr := gvkToGVR(obj.GroupVersionKind())
-	if rs.watcher != nil {
-		rs.watcher.WatchScalar(nodeID, gvr, obj.GroupVersionKind().Kind, obj.GetName(), obj.GetNamespace())
+// re-reconciliation. The watch is flushed at done(true). The resource is
+// resolved through the RESTMapper; an unresolvable kind is returned so the
+// node retries instead of watching a guessed resource.
+func registerWatch(rs *reconcileScope, scope *scopeResolver, nodeID string, obj *unstructured.Unstructured) error {
+	if rs.watcher == nil {
+		return nil
 	}
+	gvk := obj.GroupVersionKind()
+	gvr, err := scope.resourceFor(gvk)
+	if err != nil {
+		return fmt.Errorf("watching %s %s/%s: %w", gvk, obj.GetNamespace(), obj.GetName(), err)
+	}
+	rs.watcher.WatchScalar(nodeID, gvr, gvk.Kind, obj.GetName(), obj.GetNamespace())
+	return nil
 }
 
 // checkOwnership performs the pre-apply check that differs by node type:

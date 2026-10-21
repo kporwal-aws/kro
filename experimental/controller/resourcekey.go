@@ -8,9 +8,9 @@
 package graphcontroller
 
 import (
+	"fmt"
 	"strings"
 
-	"github.com/gobuffalo/flect"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -216,13 +216,26 @@ func templateHasStatus(tmpl map[string]any) bool {
 	return ok && s != nil
 }
 
-// gvkToGVR converts a GVK to a GVR using English pluralization rules.
-// Uses flect.Pluralize for correct handling of irregular plurals
-// (e.g., NetworkPolicy → networkpolicies, Ingress → ingresses).
-func gvkToGVR(gvk schema.GroupVersionKind) schema.GroupVersionResource {
-	return schema.GroupVersionResource{
-		Group:    gvk.Group,
-		Version:  gvk.Version,
-		Resource: flect.Pluralize(strings.ToLower(gvk.Kind)),
+// resourceFor resolves the REST resource (GVR) for a GVK through the
+// RESTMapper, i.e. from the API server's discovery data. A resource name is
+// whatever the serving API declares (a CRD's spec.names.plural) and cannot be
+// derived from the kind: Kind KBS may be served as "kbses", and a kind's
+// resource may not resemble its name at all. A guessed plural sends informer
+// LIST/WATCH to a resource that does not exist, so the watch silently never
+// delivers events while reconcile-time reads (which go through the
+// RESTMapper) keep working.
+//
+// The manager's RESTMapper re-reads discovery for a group on a miss, so a
+// CRD established after startup resolves on a later attempt. An unresolvable
+// kind is an error for the caller to retry — there is no fallback to a
+// guessed plural.
+func (r *scopeResolver) resourceFor(gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
+	if r == nil || r.mapper == nil {
+		return schema.GroupVersionResource{}, fmt.Errorf("resolving resource for %s: no RESTMapper configured", gvk)
 	}
+	mapping, err := r.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return schema.GroupVersionResource{}, fmt.Errorf("resolving resource for %s: %w", gvk, err)
+	}
+	return mapping.Resource, nil
 }
