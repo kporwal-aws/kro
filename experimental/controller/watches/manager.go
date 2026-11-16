@@ -132,7 +132,7 @@ func (m *WatchManager) EnsureWatch(gvr schema.GroupVersionResource, kind string,
 		defer syncCancel()
 		if !cache.WaitForCacheSync(syncCtx.Done(), inf.HasSynced) {
 			m.log.V(1).Info("cache sync timeout, will retry on next reconcile", "gvr", gvr, "duration", time.Since(syncStart))
-			m.forceStop(gvr)
+			m.stopIfCurrent(gvr, w)
 			return
 		}
 		m.log.V(1).Info("cache synced", "gvr", gvr, "duration", time.Since(syncStart))
@@ -163,6 +163,20 @@ func (m *WatchManager) releaseWatch(gvr schema.GroupVersionResource, ownerID str
 func (m *WatchManager) forceStop(gvr schema.GroupVersionResource) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stopLocked(gvr, true)
+}
+
+// stopIfCurrent stops the informer for gvr only when it is still the instance w.
+// A sync-timeout goroutine must not stop a newer informer that replaced the one
+// it was waiting on: a release-then-restart within the 30s sync window (now more
+// likely, since ensureNodeWatch restarts stopped informers) would otherwise kill
+// the healthy replacement.
+func (m *WatchManager) stopIfCurrent(gvr schema.GroupVersionResource, w *gvrWatch) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.watches[gvr] != w {
+		return
+	}
 	m.stopLocked(gvr, true)
 }
 

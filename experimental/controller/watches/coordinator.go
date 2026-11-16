@@ -91,7 +91,13 @@ func (c *WatchCoordinator) ensureNodeWatch(graphKey GraphKey, nodeID string, gvr
 	if existing, exists := nodes[nodeID]; exists {
 		if sameNodeWatch(existing, newWatch) {
 			c.mu.Unlock()
-			return // idempotent no-op
+			// The routing entry is unchanged, but its informer may have been
+			// stopped (a cache-sync timeout stops it). EnsureWatch is a cheap
+			// no-op while the informer runs and restarts it otherwise.
+			if err := c.watches.EnsureWatch(gvr, kind, GraphOwnerID(graphKey)); err != nil {
+				c.log.Error(err, "failed to ensure watch", "gvr", gvr)
+			}
+			return
 		}
 		// Different params — remove old routing entry before adding new one
 		c.removeNodeFromIndexesLocked(graphKey, nodeID, existing)
